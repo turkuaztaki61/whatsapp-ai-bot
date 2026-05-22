@@ -15,8 +15,6 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ADMIN_PHONE = process.env.ADMIN_PHONE;
 
-const users = {};
-
 async function sendMessage(to, body) {
   await axios.post(
     `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
@@ -33,12 +31,6 @@ async function sendMessage(to, body) {
       },
     }
   );
-}
-
-function resetUser(from) {
-  users[from] = {
-    orderCompleted: false,
-  };
 }
 
 app.get("/webhook", (req, res) => {
@@ -63,12 +55,7 @@ app.post("/webhook", async (req, res) => {
 
     const from = msg.from;
     const text = msg.text?.body?.trim() || "";
-
-    if (!users[from]) {
-      resetUser(from);
-    }
-
-    const lower = text.toLowerCase();
+    const lower = text.toLocaleLowerCase("tr-TR");
 
     // İPTAL
     if (
@@ -76,8 +63,6 @@ app.post("/webhook", async (req, res) => {
       lower.includes("vazgeç") ||
       lower.includes("vazgec")
     ) {
-      resetUser(from);
-
       await sendMessage(
         from,
         "Sipariş işlemi iptal edildi ✅"
@@ -87,7 +72,11 @@ app.post("/webhook", async (req, res) => {
     }
 
     // LİNK
-    if (lower.includes("link")) {
+    if (
+      lower === "link" ||
+      lower === "ürün linki" ||
+      lower === "urun linki"
+    ) {
       await sendMessage(
         from,
         "Ürün linki:\nhttps://example.com/gold-burma-bilezik"
@@ -98,8 +87,10 @@ app.post("/webhook", async (req, res) => {
 
     // FOTO
     if (
-      lower.includes("foto") ||
-      lower.includes("resim")
+      lower === "foto" ||
+      lower === "fotoğraf" ||
+      lower === "fotograf" ||
+      lower === "resim"
     ) {
       await sendMessage(
         from,
@@ -121,15 +112,14 @@ app.post("/webhook", async (req, res) => {
 Sen TURKUAZ TAKI'nın profesyonel WhatsApp satış temsilcisisin.
 
 Kurallar:
-
-- Çok kısa konuş
+- Kısa konuş
 - Samimi ol
 - Emoji kullan
 - Yapay zeka olduğunu söyleme
 - Gereksiz uzun yazma
-- Müşterinin daha önce verdiği bilgileri tekrar sorma
-- Sipariş iptal edilirse işlemi sıfırla
-- Sipariş bilgilerini doğal konuşmadan çıkar
+- Aynı soruyu tekrar sorma
+- Sipariş iptal edilirse anlayıp işlemi sıfırla
+- Müşteri tek mesajda tüm bilgileri verebilir
 
 Toplanacak bilgiler:
 - ad soyad
@@ -138,11 +128,7 @@ Toplanacak bilgiler:
 - adres
 - ürün
 
-Müşteri tüm bilgileri tek mesajda verebilir.
-
-Tüm bilgiler tamamlanınca müşteriye sipariş özetini gönder.
-
-Özet formatı:
+Tüm bilgiler tamamlandıysa müşteriye şu formatta cevap ver:
 
 ✅ Siparişiniz alınmıştır
 
@@ -152,10 +138,15 @@ Tüm bilgiler tamamlanınca müşteriye sipariş özetini gönder.
 📦 Adres:
 🛍️ Ürün:
 
-Sonra:
 "Sizinle kısa sürede iletişime geçeceğiz 😊"
 
-ASLA aynı soruyu tekrar sorma.
+Eğer bilgiler eksikse SADECE eksik olanı sor.
+
+Örnek:
+- Telefon eksikse sadece telefon iste
+- Adres eksikse sadece adres iste
+
+ASLA aynı bilgiyi tekrar isteme.
 `,
           },
           {
@@ -185,7 +176,7 @@ ASLA aynı soruyu tekrar sorma.
       if (ADMIN_PHONE) {
         await sendMessage(
           ADMIN_PHONE,
-          `🛒 Yeni sipariş:\n\n${reply}`
+          `🛒 Yeni Sipariş:\n\n${reply}`
         );
       }
     }
