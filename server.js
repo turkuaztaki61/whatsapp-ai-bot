@@ -12,9 +12,10 @@ const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ADMIN_PHONE = process.env.ADMIN_PHONE;
 
-const orders = {};
+const users = {};
 
 async function sendMessage(to, body) {
   await axios.post(
@@ -34,14 +35,9 @@ async function sendMessage(to, body) {
   );
 }
 
-function resetOrder(from) {
-  orders[from] = {
-    step: "idle",
-    name: "",
-    phone: "",
-    city: "",
-    address: "",
-    product: "",
+function resetUser(from) {
+  users[from] = {
+    orderCompleted: false,
   };
 }
 
@@ -60,108 +56,147 @@ app.get("/webhook", (req, res) => {
 app.post("/webhook", async (req, res) => {
   try {
     const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!msg) return res.sendStatus(200);
+
+    if (!msg) {
+      return res.sendStatus(200);
+    }
 
     const from = msg.from;
     const text = msg.text?.body?.trim() || "";
-    const lower = text.toLocaleLowerCase("tr-TR");
 
-    if (!orders[from]) resetOrder(from);
+    if (!users[from]) {
+      resetUser(from);
+    }
 
+    const lower = text.toLowerCase();
+
+    // İPTAL
     if (
       lower.includes("iptal") ||
       lower.includes("vazgeç") ||
-      lower.includes("vazgec") ||
-      lower.includes("sıfırla") ||
-      lower.includes("sifirla")
+      lower.includes("vazgec")
     ) {
-      resetOrder(from);
-      await sendMessage(from, "Sipariş işlemi iptal edildi ✅");
+      resetUser(from);
+
+      await sendMessage(
+        from,
+        "Sipariş işlemi iptal edildi ✅"
+      );
+
       return res.sendStatus(200);
     }
 
+    // LİNK
+    if (lower.includes("link")) {
+      await sendMessage(
+        from,
+        "Ürün linki:\nhttps://example.com/gold-burma-bilezik"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // FOTO
     if (
-      lower.includes("sipariş") ||
-      lower.includes("siparis") ||
-      lower.includes("satın") ||
-      lower.includes("satin") ||
-      lower.includes("almak istiyorum")
+      lower.includes("foto") ||
+      lower.includes("resim")
     ) {
-      resetOrder(from);
-      orders[from].step = "name";
-      await sendMessage(from, "Ad soyadınızı yazar mısınız? 😊");
+      await sendMessage(
+        from,
+        "Ürün fotoğrafı:\nhttps://via.placeholder.com/600"
+      );
+
       return res.sendStatus(200);
     }
 
-    const order = orders[from];
+    // OPENAI
+    const ai = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `
+Sen TURKUAZ TAKI'nın profesyonel WhatsApp satış temsilcisisin.
 
-    if (order.step === "name") {
-      order.name = text;
-      order.step = "phone";
-      await sendMessage(from, "Telefon numaranızı yazar mısınız? 📞");
-      return res.sendStatus(200);
-    }
+Kurallar:
 
-    if (order.step === "phone") {
-      order.phone = text;
-      order.step = "city";
-      await sendMessage(from, "Hangi şehirde yaşıyorsunuz? 🌍");
-      return res.sendStatus(200);
-    }
+- Çok kısa konuş
+- Samimi ol
+- Emoji kullan
+- Yapay zeka olduğunu söyleme
+- Gereksiz uzun yazma
+- Müşterinin daha önce verdiği bilgileri tekrar sorma
+- Sipariş iptal edilirse işlemi sıfırla
+- Sipariş bilgilerini doğal konuşmadan çıkar
 
-    if (order.step === "city") {
-      order.city = text;
-      order.step = "address";
-      await sendMessage(from, "Açık adresinizi yazar mısınız? 📦");
-      return res.sendStatus(200);
-    }
+Toplanacak bilgiler:
+- ad soyad
+- telefon
+- şehir
+- adres
+- ürün
 
-    if (order.step === "address") {
-      order.address = text;
-      order.step = "product";
-      await sendMessage(from, "Hangi ürünü sipariş etmek istiyorsunuz? 🛍️");
-      return res.sendStatus(200);
-    }
+Müşteri tüm bilgileri tek mesajda verebilir.
 
-    if (order.step === "product") {
-      order.product = text;
+Tüm bilgiler tamamlanınca müşteriye sipariş özetini gönder.
 
-      const customerText = `✅ Sipariş talebiniz alındı 😊
+Özet formatı:
 
-👤 ${order.name}
-📞 ${order.phone}
-🌍 ${order.city}
-📦 ${order.address}
-🛍️ ${order.product}
+✅ Siparişiniz alınmıştır
 
-Ekibimiz sizinle en kısa sürede iletişime geçecek.`;
+👤 Ad Soyad:
+📞 Telefon:
+🌍 Şehir:
+📦 Adres:
+🛍️ Ürün:
 
-      const adminText = `🛒 Yeni Sipariş Talebi
+Sonra:
+"Sizinle kısa sürede iletişime geçeceğiz 😊"
 
-👤 ${order.name}
-📞 ${order.phone}
-🌍 ${order.city}
-📦 ${order.address}
-🛍️ ${order.product}`;
-
-      await sendMessage(from, customerText);
-
-      if (ADMIN_PHONE) {
-        await sendMessage(ADMIN_PHONE, adminText);
+ASLA aynı soruyu tekrar sorma.
+`,
+          },
+          {
+            role: "user",
+            content: text,
+          },
+        ],
+        temperature: 0.4,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
       }
-
-      resetOrder(from);
-      return res.sendStatus(200);
-    }
-
-    await sendMessage(
-      from,
-      "Merhaba 😊 Sipariş vermek için “sipariş vermek istiyorum” yazabilirsiniz."
     );
 
+    const reply =
+      ai.data.choices[0].message.content;
+
+    await sendMessage(from, reply);
+
+    // ADMİNE GÖNDER
+    if (
+      reply.includes("✅ Siparişiniz alınmıştır")
+    ) {
+      if (ADMIN_PHONE) {
+        await sendMessage(
+          ADMIN_PHONE,
+          `🛒 Yeni sipariş:\n\n${reply}`
+        );
+      }
+    }
+
     return res.sendStatus(200);
+
   } catch (error) {
-    console.log(error.response?.data || error.message);
+    console.log(
+      error.response?.data || error.message
+    );
+
     return res.sendStatus(200);
   }
 });
