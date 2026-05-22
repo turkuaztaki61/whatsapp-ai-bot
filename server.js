@@ -13,6 +13,68 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GOOGLE_SHEET_URL = process.env.GOOGLE_SHEET_URL;
+
+function getSheetCsvUrl() {
+  const match = GOOGLE_SHEET_URL.match(/\/d\/([^/]+)/);
+  if (!match) return null;
+  const sheetId = match[1];
+  return `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=0`;
+}
+
+function parseCSV(csv) {
+  const lines = csv.trim().split("\n");
+  const headers = lines[0].split(",").map((h) => h.trim());
+
+  return lines.slice(1).map((line) => {
+    const values = line.split(",").map((v) => v.trim());
+    const item = {};
+    headers.forEach((header, index) => {
+      item[header] = values[index] || "";
+    });
+    return item;
+  });
+}
+
+async function getProducts() {
+  try {
+    const csvUrl = getSheetCsvUrl();
+    if (!csvUrl) return [];
+
+    const response = await axios.get(csvUrl);
+    return parseCSV(response.data);
+  } catch (error) {
+    console.error("Google Sheets okunamadı:", error.message);
+    return [];
+  }
+}
+
+function findMatchingProducts(text, products) {
+  const lowerText = text.toLowerCase();
+
+  return products.filter((product) => {
+    const kategori = String(product.kategori || "").toLowerCase();
+    const urunAdi = String(product.urun_adi || "").toLowerCase();
+    const aciklama = String(product.aciklama || "").toLowerCase();
+
+    return (
+      lowerText.includes(kategori) ||
+      lowerText.includes(urunAdi) ||
+      urunAdi.includes(lowerText) ||
+      aciklama.includes(lowerText)
+    );
+  });
+}
+
+function formatProducts(products) {
+  if (!products.length) return "Tabloda uygun ürün bulunamadı.";
+
+  return products
+    .map((p) => {
+      return `- ${p.urun_adi} | ${p.fiyat}₺ | Stok: ${p.stok} | ${p.aciklama}`;
+    })
+    .join("\n");
+}
 
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -41,6 +103,12 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    const products = await getProducts();
+    const matchingProducts = findMatchingProducts(text, products);
+    const productText = formatProducts(
+      matchingProducts.length ? matchingProducts : products.slice(0, 10)
+    );
+
     const systemPrompt = `
 Sen TURKUAZ TAKI'nın WhatsApp müşteri temsilcisisin.
 
@@ -50,44 +118,35 @@ Sen TURKUAZ TAKI'nın WhatsApp müşteri temsilcisisin.
 - Kendini TURKUAZ TAKI destek ekibi gibi ifade et.
 - Cevapların kısa, doğal ve satış odaklı olsun.
 - Bilmediğin fiyat, stok, kargo süresi veya ürün detayını uydurma.
-- Bilmediğin konularda "Kontrol edip size bilgi verelim" de.
+- Fiyat ve ürün bilgisini sadece aşağıdaki Google Sheets ürün listesinden ver.
+- Listede olmayan ürün için "Kontrol edip size bilgi verelim" de.
 - Müşteriyi mümkünse siparişe yönlendir.
 
-TURKUAZ TAKI ÜRÜNLERİ:
-- Yüzük
-- Kolye
-- Bileklik
-- Küpe
-- Özel tasarım takılar
+KAMPANYA:
+- 2. üründe %50 indirim vardır.
+- Her 2 üründe bir geçerlidir.
+- Her ikilide ucuz olan ürün yarı fiyatına düşer.
+- Müşteri birden fazla ürün sorarsa kampanyayı hatırlat.
 
-SATIŞ AKIŞI:
-1. Müşteri genel soru sorarsa ürün kategorisi sor.
-2. Müşteri ürün sorarsa hangi model veya tarz istediğini sor.
-3. Müşteri fiyat sorarsa hangi ürün/model için fiyat istediğini sor.
-4. Müşteri sipariş vermek isterse şu bilgileri iste:
-   - İsim soyisim
-   - İstediği ürün
-   - Şehir
-   - Telefon numarası
-5. Bilgileri alınca:
-   "Teşekkür ederiz 😊 Sipariş bilginizi aldık. Ekibimiz sizinle en kısa sürede iletişime geçecek."
+SİPARİŞ İÇİN ALINACAK BİLGİLER:
+- İsim soyisim
+- İstediği ürün
+- Şehir
+- Telefon numarası
+
+GOOGLE SHEETS ÜRÜN LİSTESİ:
+${productText}
 
 ÖRNEK CEVAPLAR:
 
-Müşteri: Merhaba
-Cevap: Merhaba 😊 TURKUAZ TAKI’ya hoş geldiniz. Yüzük, kolye, bileklik veya küpe için mi yardımcı olalım?
-
-Müşteri: Ne satıyorsunuz?
-Cevap: Yüzük, kolye, bileklik, küpe ve özel tasarım takılarımız mevcut 😊 Hangi ürünle ilgileniyorsunuz?
-
-Müşteri: Fiyatlar ne kadar?
-Cevap: Hangi ürün için fiyat bilgisi almak istersiniz? Yüzük, kolye, bileklik veya küpe olabilir 😊
+Müşteri: Burma bilezik fiyatı ne kadar?
+Cevap: Burma Bilezik fiyatımız 1250₺ 😊 Stokta mevcut. İsterseniz 2. üründe %50 kampanyamızdan da faydalanabilirsiniz.
 
 Müşteri: Sipariş vermek istiyorum
 Cevap: Memnuniyetle yardımcı oluruz 😊 Sipariş için isim soyisim, istediğiniz ürün, şehir ve telefon numaranızı paylaşır mısınız?
 
-Müşteri: Sen TURKUAZ TAKI değil misin?
-Cevap: Evet 😊 TURKUAZ TAKI destek hattındasınız. Nasıl yardımcı olabiliriz?
+Müşteri: 2 ürün alırsam indirim olur mu?
+Cevap: Evet 😊 2. üründe %50 indirim var. Her 2 üründe ucuz olan ürün yarı fiyatına düşer.
 `;
 
     const openaiResponse = await axios.post(
@@ -104,7 +163,7 @@ Cevap: Evet 😊 TURKUAZ TAKI destek hattındasınız. Nasıl yardımcı olabili
             content: text,
           },
         ],
-        temperature: 0.6,
+        temperature: 0.4,
       },
       {
         headers: {
