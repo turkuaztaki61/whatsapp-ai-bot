@@ -16,21 +16,21 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GOOGLE_SHEET_URL = process.env.GOOGLE_SHEET_URL;
 
 function getSheetCsvUrl() {
-  const match = GOOGLE_SHEET_URL.match(/\/d\/([^/]+)/);
+  const match = GOOGLE_SHEET_URL?.match(/\/d\/([^/]+)/);
   if (!match) return null;
   const sheetId = match[1];
   return `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=0`;
 }
 
 function parseCSV(csv) {
-  const lines = csv.trim().split("\n");
-  const headers = lines[0].split(",").map((h) => h.trim());
+  const lines = csv.trim().split(/\r?\n/);
+  const headers = lines[0].split(",").map(h => h.trim());
 
-  return lines.slice(1).map((line) => {
-    const values = line.split(",").map((v) => v.trim());
+  return lines.slice(1).map(line => {
+    const values = line.split(",").map(v => v.trim());
     const item = {};
-    headers.forEach((header, index) => {
-      item[header] = values[index] || "";
+    headers.forEach((header, i) => {
+      item[header] = values[i] || "";
     });
     return item;
   });
@@ -42,38 +42,42 @@ async function getProducts() {
     if (!csvUrl) return [];
 
     const response = await axios.get(csvUrl);
-    return parseCSV(response.data);
+    return parseCSV(response.data).filter(p => p.urun_adi);
   } catch (error) {
     console.error("Google Sheets okunamadı:", error.message);
     return [];
   }
 }
 
-function findMatchingProducts(text, products) {
-  const lowerText = text.toLowerCase();
+function findProducts(message, products) {
+  const text = message.toLowerCase();
 
-  return products.filter((product) => {
-    const kategori = String(product.kategori || "").toLowerCase();
-    const urunAdi = String(product.urun_adi || "").toLowerCase();
-    const aciklama = String(product.aciklama || "").toLowerCase();
+  return products.filter(p => {
+    const kategori = String(p.kategori || "").toLowerCase();
+    const urunAdi = String(p.urun_adi || "").toLowerCase();
+    const aciklama = String(p.aciklama || "").toLowerCase();
 
     return (
-      lowerText.includes(kategori) ||
-      lowerText.includes(urunAdi) ||
-      urunAdi.includes(lowerText) ||
-      aciklama.includes(lowerText)
+      text.includes(kategori) ||
+      text.includes(urunAdi) ||
+      urunAdi.includes(text) ||
+      aciklama.includes(text)
     );
   });
 }
 
-function formatProducts(products) {
-  if (!products.length) return "Tabloda uygun ürün bulunamadı.";
+function productListText(products) {
+  if (!products.length) {
+    return "Ürün listesi şu an okunamadı.";
+  }
 
-  return products
-    .map((p) => {
-      return `- ${p.urun_adi} | ${p.fiyat}₺ | Stok: ${p.stok} | ${p.aciklama}`;
-    })
-    .join("\n");
+  return products.map(p => {
+    return `Ürün: ${p.urun_adi}
+Kategori: ${p.kategori}
+Fiyat: ${p.fiyat}₺
+Stok: ${p.stok}
+Açıklama: ${p.aciklama}`;
+  }).join("\n\n");
 }
 
 app.get("/webhook", (req, res) => {
@@ -92,61 +96,58 @@ app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) {
-      return res.sendStatus(200);
-    }
+    if (!message) return res.sendStatus(200);
 
     const from = message.from;
     const text = message.text?.body;
 
-    if (!text) {
-      return res.sendStatus(200);
-    }
+    if (!text) return res.sendStatus(200);
 
     const products = await getProducts();
-    const matchingProducts = findMatchingProducts(text, products);
-    const productText = formatProducts(
-      matchingProducts.length ? matchingProducts : products.slice(0, 10)
-    );
+    const matched = findProducts(text, products);
+    const visibleProducts = matched.length ? matched : products.slice(0, 20);
 
     const systemPrompt = `
-Sen TURKUAZ TAKI'nın WhatsApp müşteri temsilcisisin.
+Sen TURKUAZ TAKI'nın profesyonel WhatsApp müşteri temsilcisisin.
 
-ÇOK ÖNEMLİ KURALLAR:
+KİMLİK:
 - Asla yapay zeka olduğunu söyleme.
-- Asla "ben bir asistanım" deme.
-- Kendini TURKUAZ TAKI destek ekibi gibi ifade et.
-- Cevapların kısa, doğal ve satış odaklı olsun.
-- Bilmediğin fiyat, stok, kargo süresi veya ürün detayını uydurma.
-- Fiyat ve ürün bilgisini sadece aşağıdaki Google Sheets ürün listesinden ver.
-- Listede olmayan ürün için "Kontrol edip size bilgi verelim" de.
-- Müşteriyi mümkünse siparişe yönlendir.
+- Asla "asistanım" deme.
+- TURKUAZ TAKI destek ekibi gibi konuş.
+
+KONUŞMA TARZI:
+- Kısa yaz.
+- Samimi ol.
+- Profesyonel ol.
+- Gereksiz uzun açıklama yapma.
+- Emoji kullan ama abartma.
+
+ÜRÜN KURALI:
+- Fiyatları sadece aşağıdaki Google Sheets ürün listesinden ver.
+- Listede olmayan ürüne fiyat uydurma.
+- Stok yoksa müşteriye kontrol edelim de.
+- Ürün sorulursa ilgili ürünü öner.
+- Genel soru gelirse kategorileri söyle.
 
 KAMPANYA:
-- 2. üründe %50 indirim vardır.
-- Her 2 üründe bir geçerlidir.
+- 2. üründe %50 indirim var.
+- Her 2 üründe bir geçerli.
 - Her ikilide ucuz olan ürün yarı fiyatına düşer.
-- Müşteri birden fazla ürün sorarsa kampanyayı hatırlat.
+- Müşteri 2 veya daha fazla ürün alırsa kampanyayı mutlaka söyle.
+- Örnek: 1250₺ + 790₺ ürünlerde ucuz olan 790₺ yarı fiyatına düşer. Toplam 1645₺ olur.
 
-SİPARİŞ İÇİN ALINACAK BİLGİLER:
+SİPARİŞ ALMA:
+Müşteri sipariş vermek isterse şu bilgileri iste:
 - İsim soyisim
-- İstediği ürün
+- Ürün adı
 - Şehir
 - Telefon numarası
 
+Bilgileri verirse:
+"Teşekkür ederiz 😊 Sipariş bilginizi aldık. Ekibimiz sizinle en kısa sürede iletişime geçecek."
+
 GOOGLE SHEETS ÜRÜN LİSTESİ:
-${productText}
-
-ÖRNEK CEVAPLAR:
-
-Müşteri: Burma bilezik fiyatı ne kadar?
-Cevap: Burma Bilezik fiyatımız 1250₺ 😊 Stokta mevcut. İsterseniz 2. üründe %50 kampanyamızdan da faydalanabilirsiniz.
-
-Müşteri: Sipariş vermek istiyorum
-Cevap: Memnuniyetle yardımcı oluruz 😊 Sipariş için isim soyisim, istediğiniz ürün, şehir ve telefon numaranızı paylaşır mısınız?
-
-Müşteri: 2 ürün alırsam indirim olur mu?
-Cevap: Evet 😊 2. üründe %50 indirim var. Her 2 üründe ucuz olan ürün yarı fiyatına düşer.
+${productListText(visibleProducts)}
 `;
 
     const openaiResponse = await axios.post(
@@ -154,22 +155,16 @@ Cevap: Evet 😊 2. üründe %50 indirim var. Her 2 üründe ucuz olan ürün ya
       {
         model: "gpt-4o-mini",
         messages: [
-          {
-            role: "system",
-            content: systemPrompt,
-          },
-          {
-            role: "user",
-            content: text,
-          },
+          { role: "system", content: systemPrompt },
+          { role: "user", content: text }
         ],
-        temperature: 0.4,
+        temperature: 0.4
       },
       {
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
+          "Content-Type": "application/json"
+        }
       }
     );
 
@@ -180,15 +175,13 @@ Cevap: Evet 😊 2. üründe %50 indirim var. Her 2 üründe ucuz olan ürün ya
       {
         messaging_product: "whatsapp",
         to: from,
-        text: {
-          body: reply,
-        },
+        text: { body: reply }
       },
       {
         headers: {
           Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json",
-        },
+          "Content-Type": "application/json"
+        }
       }
     );
 
