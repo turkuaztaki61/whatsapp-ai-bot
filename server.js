@@ -24,9 +24,7 @@ async function sendMessage(to, body) {
       messaging_product: "whatsapp",
       to,
       type: "text",
-      text: {
-        body,
-      },
+      text: { body },
     },
     {
       headers: {
@@ -35,6 +33,14 @@ async function sendMessage(to, body) {
       },
     }
   );
+}
+
+function resetCustomer(from) {
+  customers[from] = {
+    active: false,
+    step: null,
+    data: {},
+  };
 }
 
 app.get("/webhook", (req, res) => {
@@ -53,155 +59,119 @@ app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) {
-      return res.sendStatus(200);
-    }
+    if (!message) return res.sendStatus(200);
 
     const from = message.from;
     const text = message.text?.body?.trim() || "";
     const lower = text.toLowerCase();
 
+    if (!text) return res.sendStatus(200);
+
     if (!customers[from]) {
-      customers[from] = {
-        active: false,
-        step: null,
-        data: {},
-      };
+      resetCustomer(from);
     }
 
     const customer = customers[from];
 
-    // İPTAL
-    if (lower.includes("iptal")) {
-      customers[from] = {
-        active: false,
-        step: null,
-        data: {},
-      };
+    if (
+      lower === "iptal" ||
+      lower.includes("iptal ettim") ||
+      lower.includes("vazgeçtim") ||
+      lower.includes("vazgectim")
+    ) {
+      resetCustomer(from);
 
-      await sendMessage(
-        from,
-        "Sipariş işlemi iptal edildi ✅"
-      );
+      await sendMessage(from, "Sipariş işlemi iptal edildi ✅");
 
       return res.sendStatus(200);
     }
 
-    // SİPARİŞ BAŞLAT
     if (
       lower.includes("sipariş") ||
+      lower.includes("siparis") ||
       lower.includes("satın almak") ||
+      lower.includes("satin almak") ||
       lower.includes("almak istiyorum")
     ) {
       customer.active = true;
-      customer.step = "name";
-      customer.data = {};
 
-      await sendMessage(
-        from,
-        "Sipariş için ad soyadınızı yazar mısınız? 😊"
-      );
+      if (!customer.step) {
+        customer.step = "name";
+      }
+
+      await sendMessage(from, nextQuestion(customer.step));
 
       return res.sendStatus(200);
     }
 
-    // AKTİF SİPARİŞ
     if (customer.active) {
-
-      // AD
       if (customer.step === "name") {
         customer.data.name = text;
         customer.step = "phone";
 
-        await sendMessage(
-          from,
-          "Telefon numaranızı yazar mısınız? 📞"
-        );
-
+        await sendMessage(from, nextQuestion("phone"));
         return res.sendStatus(200);
       }
 
-      // TELEFON
       if (customer.step === "phone") {
         customer.data.phone = text;
         customer.step = "city";
 
-        await sendMessage(
-          from,
-          "Hangi şehirde yaşıyorsunuz? 🌍"
-        );
-
+        await sendMessage(from, nextQuestion("city"));
         return res.sendStatus(200);
       }
 
-      // ŞEHİR
       if (customer.step === "city") {
         customer.data.city = text;
         customer.step = "address";
 
-        await sendMessage(
-          from,
-          "Açık adresinizi yazar mısınız? 📦"
-        );
-
+        await sendMessage(from, nextQuestion("address"));
         return res.sendStatus(200);
       }
 
-      // ADRES
       if (customer.step === "address") {
         customer.data.address = text;
         customer.step = "product";
 
-        await sendMessage(
-          from,
-          "Hangi ürünü sipariş etmek istiyorsunuz? 🛍️"
-        );
-
+        await sendMessage(from, nextQuestion("product"));
         return res.sendStatus(200);
       }
 
-      // ÜRÜN
       if (customer.step === "product") {
         customer.data.product = text;
 
         const customerMessage = `✅ Sipariş talebiniz alındı 😊
 
-👤 ${customer.data.name}
-📞 ${customer.data.phone}
-🌍 ${customer.data.city}
-📦 ${customer.data.address}
-🛍️ ${customer.data.product}
+👤 Ad Soyad: ${customer.data.name}
+📞 Telefon: ${customer.data.phone}
+🌍 Şehir: ${customer.data.city}
+📦 Adres: ${customer.data.address}
+🛍️ Ürün: ${customer.data.product}
 
-En kısa sürede sizinle iletişime geçeceğiz.`;
+Ekibimiz sizinle en kısa sürede iletişime geçecek.`;
+
+        const adminMessage = `🛒 Yeni Sipariş Talebi
+
+👤 Ad Soyad: ${customer.data.name}
+📞 Telefon: ${customer.data.phone}
+🌍 Şehir: ${customer.data.city}
+📦 Adres: ${customer.data.address}
+🛍️ Ürün: ${customer.data.product}
+
+Müşteri WhatsApp ID: ${from}`;
 
         await sendMessage(from, customerMessage);
 
-        const adminMessage = `🛒 Yeni Sipariş
-
-👤 ${customer.data.name}
-📞 ${customer.data.phone}
-🌍 ${customer.data.city}
-📦 ${customer.data.address}
-🛍️ ${customer.data.product}`;
-
         if (ADMIN_PHONE) {
-          await sendMessage(
-            ADMIN_PHONE,
-            adminMessage
-          );
+          await sendMessage(ADMIN_PHONE, adminMessage);
         }
 
-        customers[from] = {
-          active: false,
-          step: null,
-          data: {},
-        };
+        resetCustomer(from);
 
         return res.sendStatus(200);
       }
     }
 
-    // ÜRÜN LİNKİ
     if (lower.includes("link")) {
       await sendMessage(
         from,
@@ -211,11 +181,7 @@ En kısa sürede sizinle iletişime geçeceğiz.`;
       return res.sendStatus(200);
     }
 
-    // FOTO
-    if (
-      lower.includes("foto") ||
-      lower.includes("resim")
-    ) {
+    if (lower.includes("foto") || lower.includes("resim")) {
       await sendMessage(
         from,
         "Ürün fotoğrafı:\nhttps://via.placeholder.com/600"
@@ -224,7 +190,6 @@ En kısa sürede sizinle iletişime geçeceğiz.`;
       return res.sendStatus(200);
     }
 
-    // AI CEVAP
     const aiResponse = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
@@ -233,13 +198,14 @@ En kısa sürede sizinle iletişime geçeceğiz.`;
           {
             role: "system",
             content:
-              "Sen Turkuaz Takı müşteri temsilcisisin. Samimi, kısa ve satış odaklı konuş.",
+              "Sen TURKUAZ TAKI'nın WhatsApp müşteri temsilcisisin. Yapay zeka olduğunu söyleme. Kısa, samimi ve satış odaklı cevap ver. Sipariş isteyen müşteriye isim, telefon, şehir, adres ve ürün bilgilerini iste.",
           },
           {
             role: "user",
             content: text,
           },
         ],
+        temperature: 0.4,
       },
       {
         headers: {
@@ -249,18 +215,25 @@ En kısa sürede sizinle iletişime geçeceğiz.`;
       }
     );
 
-    const reply =
-      aiResponse.data.choices[0].message.content;
+    const reply = aiResponse.data.choices[0].message.content;
 
     await sendMessage(from, reply);
 
     res.sendStatus(200);
-
   } catch (error) {
     console.log(error.response?.data || error.message);
-    res.sendStatus(500);
+    res.sendStatus(200);
   }
 });
+
+function nextQuestion(step) {
+  if (step === "name") return "Sipariş için ad soyadınızı yazar mısınız? 😊";
+  if (step === "phone") return "Telefon numaranızı yazar mısınız? 📞";
+  if (step === "city") return "Hangi şehirde yaşıyorsunuz? 🌍";
+  if (step === "address") return "Açık adresinizi yazar mısınız? 📦";
+  if (step === "product") return "Hangi ürünü sipariş etmek istiyorsunuz? 🛍️";
+  return "Nasıl yardımcı olabiliriz? 😊";
+}
 
 app.listen(PORT, () => {
   console.log("Server çalışıyor:", PORT);
