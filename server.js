@@ -7,7 +7,7 @@ app.use(express.json());
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-const PHONE_NUMBER_ID = "1157929437414549";
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
 app.get("/", (req, res) => {
   res.send("TURKUAZ TAKI WhatsApp Bot Çalışıyor");
