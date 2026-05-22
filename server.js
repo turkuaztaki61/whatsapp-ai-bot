@@ -14,7 +14,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const ADMIN_PHONE = process.env.ADMIN_PHONE;
 
-const customers = {};
+const orders = {};
 
 async function sendMessage(to, body) {
   await axios.post(
@@ -34,36 +34,15 @@ async function sendMessage(to, body) {
   );
 }
 
-function resetCustomer(from) {
-  customers[from] = {
-    active: false,
-    step: null,
-    data: {},
+function resetOrder(from) {
+  orders[from] = {
+    step: "idle",
+    name: "",
+    phone: "",
+    city: "",
+    address: "",
+    product: "",
   };
-}
-
-function nextQuestion(step) {
-  if (step === "name") {
-    return "Ad soyadınızı yazar mısınız? 😊";
-  }
-
-  if (step === "phone") {
-    return "Telefon numaranızı yazar mısınız? 📞";
-  }
-
-  if (step === "city") {
-    return "Hangi şehirde yaşıyorsunuz? 🌍";
-  }
-
-  if (step === "address") {
-    return "Açık adresinizi yazar mısınız? 📦";
-  }
-
-  if (step === "product") {
-    return "Hangi ürünü sipariş etmek istiyorsunuz? 🛍️";
-  }
-
-  return "Nasıl yardımcı olabilirim?";
 }
 
 app.get("/webhook", (req, res) => {
@@ -80,172 +59,110 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   try {
-    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!msg) return res.sendStatus(200);
 
-    if (!message) {
-      return res.sendStatus(200);
-    }
+    const from = msg.from;
+    const text = msg.text?.body?.trim() || "";
+    const lower = text.toLocaleLowerCase("tr-TR");
 
-    const from = message.from;
-    const text = message.text?.body?.trim() || "";
-    const lower = text.toLowerCase();
+    if (!orders[from]) resetOrder(from);
 
-    if (!customers[from]) {
-      resetCustomer(from);
-    }
-
-    const customer = customers[from];
-
-    // İPTAL
     if (
-      lower === "iptal" ||
-      lower.includes("iptal ettim") ||
-      lower.includes("vazgeçtim") ||
-      lower.includes("vazgectim")
+      lower.includes("iptal") ||
+      lower.includes("vazgeç") ||
+      lower.includes("vazgec") ||
+      lower.includes("sıfırla") ||
+      lower.includes("sifirla")
     ) {
-      resetCustomer(from);
-
-      await sendMessage(
-        from,
-        "Sipariş işlemi iptal edildi ✅"
-      );
-
+      resetOrder(from);
+      await sendMessage(from, "Sipariş işlemi iptal edildi ✅");
       return res.sendStatus(200);
     }
 
-    // SİPARİŞ BAŞLAT
     if (
       lower.includes("sipariş") ||
       lower.includes("siparis") ||
-      lower.includes("satın almak") ||
+      lower.includes("satın") ||
+      lower.includes("satin") ||
       lower.includes("almak istiyorum")
     ) {
-      if (!customer.active) {
-        customer.active = true;
-        customer.step = "name";
-
-        await sendMessage(from, nextQuestion("name"));
-      } else {
-        await sendMessage(
-          from,
-          "Sipariş işleminiz devam ediyor 😊"
-        );
-      }
-
+      resetOrder(from);
+      orders[from].step = "name";
+      await sendMessage(from, "Ad soyadınızı yazar mısınız? 😊");
       return res.sendStatus(200);
     }
 
-    // AKTİF SİPARİŞ AKIŞI
-    if (customer.active) {
+    const order = orders[from];
 
-      // İSİM
-      if (customer.step === "name") {
-        customer.data.name = text;
-        customer.step = "phone";
-
-        await sendMessage(from, nextQuestion("phone"));
-        return res.sendStatus(200);
-      }
-
-      // TELEFON
-      if (customer.step === "phone") {
-        customer.data.phone = text;
-        customer.step = "city";
-
-        await sendMessage(from, nextQuestion("city"));
-        return res.sendStatus(200);
-      }
-
-      // ŞEHİR
-      if (customer.step === "city") {
-        customer.data.city = text;
-        customer.step = "address";
-
-        await sendMessage(from, nextQuestion("address"));
-        return res.sendStatus(200);
-      }
-
-      // ADRES
-      if (customer.step === "address") {
-        customer.data.address = text;
-        customer.step = "product";
-
-        await sendMessage(from, nextQuestion("product"));
-        return res.sendStatus(200);
-      }
-
-      // ÜRÜN
-      if (customer.step === "product") {
-        customer.data.product = text;
-
-        const customerText = `
-✅ Siparişiniz alınmıştır.
-
-👤 ${customer.data.name}
-📞 ${customer.data.phone}
-🌍 ${customer.data.city}
-📦 ${customer.data.address}
-🛍️ ${customer.data.product}
-
-Ekibimiz en kısa sürede sizinle iletişime geçecektir 😊
-`;
-
-        const adminText = `
-🛒 Yeni Sipariş
-
-👤 ${customer.data.name}
-📞 ${customer.data.phone}
-🌍 ${customer.data.city}
-📦 ${customer.data.address}
-🛍️ ${customer.data.product}
-`;
-
-        await sendMessage(from, customerText);
-
-        if (ADMIN_PHONE) {
-          await sendMessage(ADMIN_PHONE, adminText);
-        }
-
-        resetCustomer(from);
-
-        return res.sendStatus(200);
-      }
-    }
-
-    // LİNK
-    if (lower.includes("link")) {
-      await sendMessage(
-        from,
-        "Ürün linki:\nhttps://example.com/gold-burma-bilezik"
-      );
-
+    if (order.step === "name") {
+      order.name = text;
+      order.step = "phone";
+      await sendMessage(from, "Telefon numaranızı yazar mısınız? 📞");
       return res.sendStatus(200);
     }
 
-    // FOTO
-    if (
-      lower.includes("foto") ||
-      lower.includes("resim")
-    ) {
-      await sendMessage(
-        from,
-        "Ürün fotoğrafı:\nhttps://via.placeholder.com/600"
-      );
-
+    if (order.step === "phone") {
+      order.phone = text;
+      order.step = "city";
+      await sendMessage(from, "Hangi şehirde yaşıyorsunuz? 🌍");
       return res.sendStatus(200);
     }
 
-    // NORMAL MESAJ
+    if (order.step === "city") {
+      order.city = text;
+      order.step = "address";
+      await sendMessage(from, "Açık adresinizi yazar mısınız? 📦");
+      return res.sendStatus(200);
+    }
+
+    if (order.step === "address") {
+      order.address = text;
+      order.step = "product";
+      await sendMessage(from, "Hangi ürünü sipariş etmek istiyorsunuz? 🛍️");
+      return res.sendStatus(200);
+    }
+
+    if (order.step === "product") {
+      order.product = text;
+
+      const customerText = `✅ Sipariş talebiniz alındı 😊
+
+👤 ${order.name}
+📞 ${order.phone}
+🌍 ${order.city}
+📦 ${order.address}
+🛍️ ${order.product}
+
+Ekibimiz sizinle en kısa sürede iletişime geçecek.`;
+
+      const adminText = `🛒 Yeni Sipariş Talebi
+
+👤 ${order.name}
+📞 ${order.phone}
+🌍 ${order.city}
+📦 ${order.address}
+🛍️ ${order.product}`;
+
+      await sendMessage(from, customerText);
+
+      if (ADMIN_PHONE) {
+        await sendMessage(ADMIN_PHONE, adminText);
+      }
+
+      resetOrder(from);
+      return res.sendStatus(200);
+    }
+
     await sendMessage(
       from,
-      "Merhaba 😊 Size nasıl yardımcı olabilirim?"
+      "Merhaba 😊 Sipariş vermek için “sipariş vermek istiyorum” yazabilirsiniz."
     );
 
-    res.sendStatus(200);
-
+    return res.sendStatus(200);
   } catch (error) {
     console.log(error.response?.data || error.message);
-    res.sendStatus(200);
+    return res.sendStatus(200);
   }
 });
 
