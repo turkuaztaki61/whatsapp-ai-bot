@@ -15,89 +15,32 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GOOGLE_SHEET_URL = process.env.GOOGLE_SHEET_URL;
 
-function getSheetCsvUrl() {
-  const match = GOOGLE_SHEET_URL?.match(/\/d\/([^/]+)/);
-
-  if (!match) return null;
-
-  const sheetId = match[1];
-
-  return `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=0`;
-}
-
-function parseCSV(csv) {
-  const lines = csv.trim().split(/\r?\n/);
-  const headers = lines[0].split(",").map(h => h.trim());
-
-  return lines.slice(1).map(line => {
-    const values = line.split(",").map(v => v.trim());
-    const item = {};
-
-    headers.forEach((header, i) => {
-      item[header] = values[i] || "";
-    });
-
-    return item;
-  });
-}
-
 async function getProducts() {
   try {
-    const csvUrl = getSheetCsvUrl();
+    const response = await axios.get(GOOGLE_SHEET_URL);
+    const text = response.data;
 
-    if (!csvUrl) return [];
+    const rows = text.split("\n").slice(1);
 
-    const response = await axios.get(csvUrl);
-    const products = parseCSV(response.data);
+    return rows.map((row) => {
+      const cols = row.split(",");
 
-    return products.filter(
-      p =>
-        p.urun_adi &&
-        String(p.aktif || "").toLowerCase() === "evet"
-    );
-  } catch (error) {
-    console.log("Google Sheets okunamadı:", error.message);
+      return {
+        kategori: cols[0],
+        urun_adi: cols[1],
+        fiyat: cols[2],
+        stok: cols[3],
+        aciklama: cols[4],
+        foto_url: cols[5],
+        urun_linki: cols[6],
+        etiket: cols[7],
+        aktif: cols[8]
+      };
+    });
+  } catch (err) {
+    console.log(err);
     return [];
   }
-}
-
-function findProducts(message, products) {
-  const text = String(message || "").toLowerCase();
-
-  return products.filter(p => {
-    const kategori = String(p.kategori || "").toLowerCase();
-    const urunAdi = String(p.urun_adi || "").toLowerCase();
-    const aciklama = String(p.aciklama || "").toLowerCase();
-    const etiket = String(p.etiket || "").toLowerCase();
-
-    return (
-      text.includes(kategori) ||
-      text.includes(urunAdi) ||
-      text.includes(aciklama) ||
-      text.includes(etiket) ||
-      urunAdi.includes(text) ||
-      etiket.includes(text)
-    );
-  });
-}
-
-function productListText(products) {
-  if (!products.length) {
-    return "Aktif ürün bulunamadı.";
-  }
-
-  return products.map(p => {
-    return `
-Ürün: ${p.urun_adi}
-Kategori: ${p.kategori}
-Fiyat: ${p.fiyat}₺
-Stok: ${p.stok}
-Açıklama: ${p.aciklama}
-Ürün Linki: ${p.urun_linki}
-Fotoğraf Linki: ${p.foto_url}
-Etiketler: ${p.etiket}
-`;
-  }).join("\n");
 }
 
 app.get("/webhook", (req, res) => {
@@ -114,98 +57,74 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   try {
-    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const message =
+      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) return res.sendStatus(200);
+    if (!message) {
+      return res.sendStatus(200);
+    }
 
     const from = message.from;
-    const text = message.text?.body;
+    const text = message.text?.body?.toLowerCase() || "";
 
-    if (!text) return res.sendStatus(200);
+    const products = await getProducts();
 
-    const allProducts = await getProducts();
-    const matchedProducts = findProducts(text, allProducts);
+    let foundProduct = null;
 
-    const visibleProducts =
-      matchedProducts.length > 0
-        ? matchedProducts
-        : allProducts.slice(0, 10);
+    for (const product of products) {
+      const tags = product.etiket?.toLowerCase() || "";
+      const name = product.urun_adi?.toLowerCase() || "";
 
-    const systemPrompt = `
-Sen TURKUAZ TAKI'nın WhatsApp müşteri temsilcisisin.
-
-KİMLİK:
-- Yapay zeka olduğunu söyleme.
-- Asistan olduğunu söyleme.
-- TURKUAZ TAKI destek ekibi gibi konuş.
-
-KONUŞMA TARZI:
-- Kısa yaz.
-- Samimi ol.
-- Profesyonel ol.
-- Satış odaklı ol.
-- Gereksiz uzun açıklama yapma.
-- Emoji kullan ama abartma.
-
-ÜRÜN KURALLARI:
-- Fiyatları sadece aşağıdaki Google Sheets ürün listesinden ver.
-- Listede olmayan ürüne fiyat uydurma.
-- Sadece aktif ürünleri öner.
-- Stok "var" ise stokta olduğunu söyle.
-- Stok yoksa "Kontrol edip size bilgi verelim" de.
-- Ürün linki varsa mutlaka paylaşabilirsin.
-- Müşteri link isterse ürün_linki değerini gönder.
-- Müşteri fotoğraf isterse foto_url değerini gönder.
-- "Link paylaşamam" deme.
-- "Fotoğraf paylaşamam" deme.
-- Genel link isterse ürün linkini gönder.
-- Ürün belli değilse hangi ürün için link istediğini sor.
-
-KAMPANYA:
-- 2. üründe %50 indirim var.
-- Her 2 üründe bir geçerli.
-- Her ikilide ucuz olan ürün yarı fiyatına düşer.
-- Müşteri 2 veya daha fazla ürün alırsa kampanyayı mutlaka söyle.
-
-SİPARİŞ ALMA:
-Müşteri sipariş vermek isterse şu bilgileri iste:
-- İsim soyisim
-- Telefon
-- Şehir
-- Ürün adı
-
-Bilgileri verirse şu cevabı ver:
-"Teşekkür ederiz 😊 Sipariş bilginizi aldık. Ekibimiz sizinle en kısa sürede iletişime geçecek."
-
-ÜRÜNLER:
-${productListText(visibleProducts)}
-`;
-
-    const openaiResponse = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: systemPrompt
-          },
-          {
-            role: "user",
-            content: text
-          }
-        ],
-        temperature: 0.4
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        }
+      if (
+        text.includes(name) ||
+        tags.split(",").some((tag) => text.includes(tag.trim()))
+      ) {
+        foundProduct = product;
+        break;
       }
-    );
+    }
 
-    const reply = openaiResponse.data.choices[0].message.content;
+    let reply = "";
+
+    if (foundProduct) {
+      if (text.includes("link")) {
+        reply = `Ürün linki:\n${foundProduct.urun_linki}`;
+      } else if (
+        text.includes("foto") ||
+        text.includes("resim")
+      ) {
+        reply = `Ürün fotoğrafı:\n${foundProduct.foto_url}`;
+      } else {
+        reply = `${foundProduct.urun_adi} fiyatı ${foundProduct.fiyat}₺.\n\n${foundProduct.aciklama}`;
+      }
+    } else {
+      const aiResponse = await axios.post(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content:
+                "Sen Turkuaz Takı müşteri temsilcisisin. Kısa ve samimi cevap ver."
+            },
+            {
+              role: "user",
+              content: text
+            }
+          ]
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+            "Content-Type": "application/json"
+          }
+        }
+      );
+
+      reply =
+        aiResponse.data.choices[0].message.content;
+    }
 
     await axios.post(
       `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
@@ -227,7 +146,7 @@ ${productListText(visibleProducts)}
     res.sendStatus(200);
   } catch (error) {
     console.log(error.response?.data || error.message);
-    res.sendStatus(200);
+    res.sendStatus(500);
   }
 });
 
