@@ -39,8 +39,8 @@ app.post("/webhook", async (req, res) => {
 
       console.log("Mesaj:", text);
 
-      await fetch(
-        "https://graph.facebook.com/v25.0/101070864485171/messages",
+      const response = await fetch(
+        "https://graph.facebook.com/v25.0/1157929437414549/messages",
         {
           method: "POST",
           headers: {
@@ -56,11 +56,14 @@ app.post("/webhook", async (req, res) => {
           }),
         }
       );
+
+      const data = await response.json();
+      console.log("CEVAP GÖNDERİLDİ:", data);
     }
 
     res.sendStatus(200);
   } catch (error) {
-    console.log(error);
+    console.log("HATA:", error);
     res.sendStatus(500);
   }
 });
