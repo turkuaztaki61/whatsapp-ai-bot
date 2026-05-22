@@ -46,6 +46,17 @@ async function saveOrderToSheet(order) {
   });
 }
 
+function extractJson(text) {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+}
+
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -110,15 +121,10 @@ app.post("/webhook", async (req, res) => {
           {
             role: "system",
             content: `
-Sen TURKUAZ TAKI'nın profesyonel WhatsApp satış temsilcisisin.
+Sen TURKUAZ TAKI'nın WhatsApp satış temsilcisisin.
 
-Kurallar:
-- Kısa konuş.
-- Samimi ol.
-- Yapay zeka olduğunu söyleme.
-- Aynı soruyu tekrar sorma.
-- Müşteri tek mesajda tüm sipariş bilgilerini verebilir.
-- Eksik bilgi varsa sadece eksik olanı sor.
+Görevin:
+Müşteri mesajından sipariş bilgilerini çıkar.
 
 Toplanacak bilgiler:
 - ad_soyad
@@ -127,8 +133,7 @@ Toplanacak bilgiler:
 - adres
 - urun
 
-Tüm bilgiler tamamlandıysa SADECE şu formatta JSON döndür:
-
+Eğer tüm bilgiler varsa SADECE JSON döndür:
 {
   "siparis_tamam": true,
   "ad_soyad": "",
@@ -138,8 +143,13 @@ Tüm bilgiler tamamlandıysa SADECE şu formatta JSON döndür:
   "urun": ""
 }
 
-Bilgiler eksikse müşteriye kısa cevap ver.
-JSON dışında hiçbir şey yazma sadece sipariş tamamlandıysa JSON yaz.
+Eğer bilgi eksikse JSON döndürme.
+Sadece müşteriye kısa ve doğal şekilde eksik olan bilgiyi sor.
+
+Kurallar:
+- Yapay zeka olduğunu söyleme.
+- Aynı bilgiyi tekrar isteme.
+- Gereksiz uzun konuşma.
 `,
           },
           {
@@ -147,7 +157,7 @@ JSON dışında hiçbir şey yazma sadece sipariş tamamlandıysa JSON yaz.
             content: text,
           },
         ],
-        temperature: 0.2,
+        temperature: 0.1,
       },
       {
         headers: {
@@ -157,13 +167,11 @@ JSON dışında hiçbir şey yazma sadece sipariş tamamlandıysa JSON yaz.
       }
     );
 
-    const reply = ai.data.choices[0].message.content.trim();
+    const aiReply = ai.data.choices[0].message.content.trim();
+    const order = extractJson(aiReply);
 
-    if (reply.startsWith("{")) {
-      const order = JSON.parse(reply);
-
-      if (order.siparis_tamam) {
-        const customerText = `✅ Siparişiniz alınmıştır
+    if (order && order.siparis_tamam) {
+      const customerText = `✅ Siparişiniz alınmıştır
 
 👤 Ad Soyad: ${order.ad_soyad}
 📞 Telefon: ${order.telefon}
@@ -173,7 +181,7 @@ JSON dışında hiçbir şey yazma sadece sipariş tamamlandıysa JSON yaz.
 
 Sizinle kısa sürede iletişime geçeceğiz 😊`;
 
-        const adminText = `🛒 Yeni Sipariş
+      const adminText = `🛒 Yeni Sipariş
 
 👤 Ad Soyad: ${order.ad_soyad}
 📞 Telefon: ${order.telefon}
@@ -181,20 +189,18 @@ Sizinle kısa sürede iletişime geçeceğiz 😊`;
 📦 Adres: ${order.adres}
 🛍️ Ürün: ${order.urun}`;
 
-        await sendMessage(from, customerText);
+      await sendMessage(from, customerText);
 
-        if (ADMIN_PHONE) {
-          await sendMessage(ADMIN_PHONE, adminText);
-        }
-
-        await saveOrderToSheet(order);
-
-        return res.sendStatus(200);
+      if (ADMIN_PHONE) {
+        await sendMessage(ADMIN_PHONE, adminText);
       }
+
+      await saveOrderToSheet(order);
+
+      return res.sendStatus(200);
     }
 
-    await sendMessage(from, reply);
-
+    await sendMessage(from, aiReply);
     return res.sendStatus(200);
   } catch (error) {
     console.log(error.response?.data || error.message);
