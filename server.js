@@ -1,6 +1,5 @@
 const express = require("express");
 const axios = require("axios");
-const { google } = require("googleapis");
 const OpenAI = require("openai");
 
 const app = express();
@@ -12,8 +11,7 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
-const GOOGLE_SERVICE_ACCOUNT = process.env.GOOGLE_SERVICE_ACCOUNT;
+const GOOGLE_SCRIPT_URL = process.env.GOOGLE_SCRIPT_URL;
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
@@ -48,33 +46,16 @@ async function sendWhatsAppMessage(to, message) {
 }
 
 async function saveToGoogleSheets(data) {
-  const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT);
-
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-
-  const sheets = google.sheets({ version: "v4", auth });
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    range: "Sayfa1!A:H",
-    valueInputOption: "USER_ENTERED",
-    requestBody: {
-      values: [
-        [
-          new Date().toLocaleString("tr-TR"),
-          data.ad_soyad || "",
-          data.telefon || "",
-          data.sehir || "",
-          data.adres || "",
-          data.urun || "",
-          data.olcu || "",
-          data.not || "",
-        ],
-      ],
-    },
+  await axios.post(GOOGLE_SCRIPT_URL, {
+    tarih: new Date().toLocaleString("tr-TR"),
+    ad_soyad: data.ad_soyad || "",
+    telefon: data.telefon || "",
+    sehir: data.sehir || "",
+    adres: data.adres || "",
+    urun: data.urun || "",
+    olcu: data.olcu || "",
+    durum: "Yeni Sipariş",
+    mesaj: data.mesaj || "",
   });
 }
 
@@ -82,16 +63,14 @@ async function analyzeMessage(message, oldData) {
   const prompt = `
 Sen bir kuyumcu WhatsApp sipariş asistanısın.
 
-Görevin müşterinin mesajından sipariş bilgilerini çıkarmak.
-Eski bilgiler varsa onları koru, yeni mesajdaki bilgilerle tamamla.
-
-Kesinlikle açıklama yazma.
-Sadece JSON döndür.
+Müşteri mesajından sipariş bilgilerini çıkar.
+Eski bilgileri koru, yeni mesajdaki bilgilerle tamamla.
+Sadece JSON döndür. Açıklama yazma.
 
 Eski bilgiler:
 ${JSON.stringify(oldData || {})}
 
-Yeni müşteri mesajı:
+Yeni mesaj:
 ${message}
 
 JSON formatı:
@@ -108,15 +87,14 @@ JSON formatı:
 }
 
 Kurallar:
-- Müşteri adını söylediyse ad_soyad alanına yaz.
+- Eski bilgileri asla silme.
+- Müşteri ismini söylediyse ad_soyad alanına yaz.
 - Telefon numarasını yakala.
 - Ürün alyans, bilezik, yüzük, kolye vb olabilir.
 - Ölçü varsa olcu alanına yaz.
 - Şehir/ilçe varsa sehir alanına yaz.
 - Açık adres varsa adres alanına yaz.
-- Eski bilgileri asla silme.
-- Sipariş tamam sayılması için en az ad_soyad, telefon, ürün ve adres olmalı.
-- Eksik olan tek şeyi eksik_bilgi alanına yaz.
+- Sipariş tamam olması için ad_soyad, telefon, urun ve adres dolu olmalı.
 `;
 
   const response = await openai.chat.completions.create({
@@ -137,17 +115,15 @@ app.get("/webhook", (req, res) => {
     return res.status(200).send(challenge);
   }
 
-  res.sendStatus(403);
+  return res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const entry = req.body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const message = value?.messages?.[0];
+    const message =
+      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
     if (!message || message.type !== "text") return;
 
@@ -172,6 +148,7 @@ app.post("/webhook", async (req, res) => {
     sessions[from] = {
       ...sessions[from],
       ...analyzed,
+      mesaj: text,
     };
 
     const data = sessions[from];
@@ -202,12 +179,12 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    let soru = "Siparişinizi tamamlamak için ";
+    let soru = "";
 
-    if (!data.ad_soyad) soru += "adınızı soyadınızı öğrenebilir miyim?";
-    else if (!data.telefon) soru += "telefon numaranızı öğrenebilir miyim?";
-    else if (!data.urun) soru += "almak istediğiniz ürünü öğrenebilir miyim?";
-    else if (!data.adres) soru += "açık adresinizi öğrenebilir miyim?";
+    if (!data.ad_soyad) soru = "Adınızı soyadınızı öğrenebilir miyim?";
+    else if (!data.telefon) soru = "Telefon numaranızı öğrenebilir miyim?";
+    else if (!data.urun) soru = "Almak istediğiniz ürünü öğrenebilir miyim?";
+    else if (!data.adres) soru = "Açık adresinizi öğrenebilir miyim?";
     else soru = "Eksik bilgileri paylaşabilir misiniz?";
 
     await sendWhatsAppMessage(from, soru);
