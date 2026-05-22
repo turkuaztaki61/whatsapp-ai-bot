@@ -4,6 +4,8 @@ const app = express();
 
 app.use(express.json());
 
+const TOKEN = process.env.WHATSAPP_TOKEN;
+
 app.get("/", (req, res) => {
   res.send("WhatsApp AI Bot Çalışıyor");
 });
@@ -23,11 +25,44 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-app.post("/webhook", (req, res) => {
+app.post("/webhook", async (req, res) => {
   console.log("MESAJ GELDİ:");
-  console.log(req.body);
+  console.log(JSON.stringify(req.body, null, 2));
 
-  res.sendStatus(200);
+  try {
+    const message =
+      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+
+    if (message) {
+      const from = message.from;
+      const text = message.text?.body;
+
+      console.log("Mesaj:", text);
+
+      await fetch(
+        "https://graph.facebook.com/v25.0/101070864485171/messages",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${TOKEN}`,
+          },
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            to: from,
+            text: {
+              body: "Merhaba 👋 Mesajını aldım: " + text,
+            },
+          }),
+        }
+      );
+    }
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.log(error);
+    res.sendStatus(500);
+  }
 });
 
 const PORT = process.env.PORT || 3000;
