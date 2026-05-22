@@ -4,7 +4,10 @@ const app = express();
 
 app.use(express.json());
 
-const TOKEN = process.env.WHATSAPP_TOKEN;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+const PHONE_NUMBER_ID = "1157929437414549";
 
 app.get("/", (req, res) => {
   res.send("WhatsApp AI Bot Çalışıyor");
@@ -25,40 +28,66 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-app.post("/webhook", async (req, res) => {
-  console.log("MESAJ GELDİ:");
-  console.log(JSON.stringify(req.body, null, 2));
+async function askChatGPT(userMessage) {
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4.1-mini",
+      input: userMessage,
+    }),
+  });
 
+  const data = await response.json();
+
+  console.log("OPENAI CEVABI:", data);
+
+  return data.output_text || "Şu an cevap oluşturamadım.";
+}
+
+async function sendWhatsAppMessage(to, text) {
+  const response = await fetch(
+    `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: to,
+        text: {
+          body: text,
+        },
+      }),
+    }
+  );
+
+  const data = await response.json();
+  console.log("WHATSAPP CEVABI:", data);
+}
+
+app.post("/webhook", async (req, res) => {
   try {
+    console.log("MESAJ GELDİ:");
+    console.log(JSON.stringify(req.body, null, 2));
+
     const message =
       req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (message) {
+    if (message && message.type === "text") {
       const from = message.from;
-      const text = message.text?.body;
+      const userText = message.text?.body || "";
 
-      console.log("Mesaj:", text);
+      console.log("KULLANICI MESAJI:", userText);
 
-      const response = await fetch(
-        "https://graph.facebook.com/v25.0/1157929437414549/messages",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${TOKEN}`,
-          },
-          body: JSON.stringify({
-            messaging_product: "whatsapp",
-            to: from,
-            text: {
-              body: "Merhaba 👋 Mesajını aldım: " + text,
-            },
-          }),
-        }
-      );
+      const aiReply = await askChatGPT(userText);
 
-      const data = await response.json();
-      console.log("CEVAP GÖNDERİLDİ:", data);
+      await sendWhatsAppMessage(from, aiReply);
     }
 
     res.sendStatus(200);
