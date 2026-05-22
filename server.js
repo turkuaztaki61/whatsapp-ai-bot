@@ -14,6 +14,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ADMIN_PHONE = process.env.ADMIN_PHONE;
+const GOOGLE_SCRIPT_URL = process.env.GOOGLE_SCRIPT_URL;
 
 async function sendMessage(to, body) {
   await axios.post(
@@ -33,6 +34,18 @@ async function sendMessage(to, body) {
   );
 }
 
+async function saveOrderToSheet(order) {
+  if (!GOOGLE_SCRIPT_URL) return;
+
+  await axios.post(GOOGLE_SCRIPT_URL, {
+    ad_soyad: order.ad_soyad,
+    telefon: order.telefon,
+    sehir: order.sehir,
+    adres: order.adres,
+    urun: order.urun,
+  });
+}
+
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -49,29 +62,21 @@ app.post("/webhook", async (req, res) => {
   try {
     const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!msg) {
-      return res.sendStatus(200);
-    }
+    if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
     const text = msg.text?.body?.trim() || "";
     const lower = text.toLocaleLowerCase("tr-TR");
 
-    // İPTAL
     if (
       lower.includes("iptal") ||
       lower.includes("vazgeç") ||
       lower.includes("vazgec")
     ) {
-      await sendMessage(
-        from,
-        "Sipariş işlemi iptal edildi ✅"
-      );
-
+      await sendMessage(from, "Sipariş işlemi iptal edildi ✅");
       return res.sendStatus(200);
     }
 
-    // LİNK
     if (
       lower === "link" ||
       lower === "ürün linki" ||
@@ -81,11 +86,9 @@ app.post("/webhook", async (req, res) => {
         from,
         "Ürün linki:\nhttps://example.com/gold-burma-bilezik"
       );
-
       return res.sendStatus(200);
     }
 
-    // FOTO
     if (
       lower === "foto" ||
       lower === "fotoğraf" ||
@@ -96,11 +99,9 @@ app.post("/webhook", async (req, res) => {
         from,
         "Ürün fotoğrafı:\nhttps://via.placeholder.com/600"
       );
-
       return res.sendStatus(200);
     }
 
-    // OPENAI
     const ai = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
@@ -112,41 +113,33 @@ app.post("/webhook", async (req, res) => {
 Sen TURKUAZ TAKI'nın profesyonel WhatsApp satış temsilcisisin.
 
 Kurallar:
-- Kısa konuş
-- Samimi ol
-- Emoji kullan
-- Yapay zeka olduğunu söyleme
-- Gereksiz uzun yazma
-- Aynı soruyu tekrar sorma
-- Sipariş iptal edilirse anlayıp işlemi sıfırla
-- Müşteri tek mesajda tüm bilgileri verebilir
+- Kısa konuş.
+- Samimi ol.
+- Yapay zeka olduğunu söyleme.
+- Aynı soruyu tekrar sorma.
+- Müşteri tek mesajda tüm sipariş bilgilerini verebilir.
+- Eksik bilgi varsa sadece eksik olanı sor.
 
 Toplanacak bilgiler:
-- ad soyad
+- ad_soyad
 - telefon
-- şehir
+- sehir
 - adres
-- ürün
+- urun
 
-Tüm bilgiler tamamlandıysa müşteriye şu formatta cevap ver:
+Tüm bilgiler tamamlandıysa SADECE şu formatta JSON döndür:
 
-✅ Siparişiniz alınmıştır
+{
+  "siparis_tamam": true,
+  "ad_soyad": "",
+  "telefon": "",
+  "sehir": "",
+  "adres": "",
+  "urun": ""
+}
 
-👤 Ad Soyad:
-📞 Telefon:
-🌍 Şehir:
-📦 Adres:
-🛍️ Ürün:
-
-"Sizinle kısa sürede iletişime geçeceğiz 😊"
-
-Eğer bilgiler eksikse SADECE eksik olanı sor.
-
-Örnek:
-- Telefon eksikse sadece telefon iste
-- Adres eksikse sadece adres iste
-
-ASLA aynı bilgiyi tekrar isteme.
+Bilgiler eksikse müşteriye kısa cevap ver.
+JSON dışında hiçbir şey yazma sadece sipariş tamamlandıysa JSON yaz.
 `,
           },
           {
@@ -154,7 +147,7 @@ ASLA aynı bilgiyi tekrar isteme.
             content: text,
           },
         ],
-        temperature: 0.4,
+        temperature: 0.2,
       },
       {
         headers: {
@@ -164,30 +157,47 @@ ASLA aynı bilgiyi tekrar isteme.
       }
     );
 
-    const reply =
-      ai.data.choices[0].message.content;
+    const reply = ai.data.choices[0].message.content.trim();
 
-    await sendMessage(from, reply);
+    if (reply.startsWith("{")) {
+      const order = JSON.parse(reply);
 
-    // ADMİNE GÖNDER
-    if (
-      reply.includes("✅ Siparişiniz alınmıştır")
-    ) {
-      if (ADMIN_PHONE) {
-        await sendMessage(
-          ADMIN_PHONE,
-          `🛒 Yeni Sipariş:\n\n${reply}`
-        );
+      if (order.siparis_tamam) {
+        const customerText = `✅ Siparişiniz alınmıştır
+
+👤 Ad Soyad: ${order.ad_soyad}
+📞 Telefon: ${order.telefon}
+🌍 Şehir: ${order.sehir}
+📦 Adres: ${order.adres}
+🛍️ Ürün: ${order.urun}
+
+Sizinle kısa sürede iletişime geçeceğiz 😊`;
+
+        const adminText = `🛒 Yeni Sipariş
+
+👤 Ad Soyad: ${order.ad_soyad}
+📞 Telefon: ${order.telefon}
+🌍 Şehir: ${order.sehir}
+📦 Adres: ${order.adres}
+🛍️ Ürün: ${order.urun}`;
+
+        await sendMessage(from, customerText);
+
+        if (ADMIN_PHONE) {
+          await sendMessage(ADMIN_PHONE, adminText);
+        }
+
+        await saveOrderToSheet(order);
+
+        return res.sendStatus(200);
       }
     }
 
+    await sendMessage(from, reply);
+
     return res.sendStatus(200);
-
   } catch (error) {
-    console.log(
-      error.response?.data || error.message
-    );
-
+    console.log(error.response?.data || error.message);
     return res.sendStatus(200);
   }
 });
