@@ -27,12 +27,10 @@ function getSheetCsvUrl() {
 
 function parseCSV(csv) {
   const lines = csv.trim().split(/\r?\n/);
-
   const headers = lines[0].split(",").map(h => h.trim());
 
   return lines.slice(1).map(line => {
     const values = line.split(",").map(v => v.trim());
-
     const item = {};
 
     headers.forEach((header, i) => {
@@ -50,22 +48,21 @@ async function getProducts() {
     if (!csvUrl) return [];
 
     const response = await axios.get(csvUrl);
-
     const products = parseCSV(response.data);
 
     return products.filter(
       p =>
         p.urun_adi &&
-        String(p.aktif).toLowerCase() === "evet"
+        String(p.aktif || "").toLowerCase() === "evet"
     );
   } catch (error) {
-    console.log(error.message);
+    console.log("Google Sheets okunamadı:", error.message);
     return [];
   }
 }
 
 function findProducts(message, products) {
-  const text = message.toLowerCase();
+  const text = String(message || "").toLowerCase();
 
   return products.filter(p => {
     const kategori = String(p.kategori || "").toLowerCase();
@@ -77,12 +74,18 @@ function findProducts(message, products) {
       text.includes(kategori) ||
       text.includes(urunAdi) ||
       text.includes(aciklama) ||
-      text.includes(etiket)
+      text.includes(etiket) ||
+      urunAdi.includes(text) ||
+      etiket.includes(text)
     );
   });
 }
 
 function productListText(products) {
+  if (!products.length) {
+    return "Aktif ürün bulunamadı.";
+  }
+
   return products.map(p => {
     return `
 Ürün: ${p.urun_adi}
@@ -91,7 +94,8 @@ Fiyat: ${p.fiyat}₺
 Stok: ${p.stok}
 Açıklama: ${p.aciklama}
 Ürün Linki: ${p.urun_linki}
-Fotoğraf: ${p.foto_url}
+Fotoğraf Linki: ${p.foto_url}
+Etiketler: ${p.etiket}
 `;
   }).join("\n");
 }
@@ -120,7 +124,6 @@ app.post("/webhook", async (req, res) => {
     if (!text) return res.sendStatus(200);
 
     const allProducts = await getProducts();
-
     const matchedProducts = findProducts(text, allProducts);
 
     const visibleProducts =
@@ -129,28 +132,52 @@ app.post("/webhook", async (req, res) => {
         : allProducts.slice(0, 10);
 
     const systemPrompt = `
-Sen TURKUAZ TAKI müşteri temsilcisisin.
+Sen TURKUAZ TAKI'nın WhatsApp müşteri temsilcisisin.
 
-Kurallar:
+KİMLİK:
 - Yapay zeka olduğunu söyleme.
-- Samimi konuş.
+- Asistan olduğunu söyleme.
+- TURKUAZ TAKI destek ekibi gibi konuş.
+
+KONUŞMA TARZI:
+- Kısa yaz.
+- Samimi ol.
+- Profesyonel ol.
 - Satış odaklı ol.
-- Kısa ve doğal yaz.
+- Gereksiz uzun açıklama yapma.
 - Emoji kullan ama abartma.
 
-Kampanya:
+ÜRÜN KURALLARI:
+- Fiyatları sadece aşağıdaki Google Sheets ürün listesinden ver.
+- Listede olmayan ürüne fiyat uydurma.
+- Sadece aktif ürünleri öner.
+- Stok "var" ise stokta olduğunu söyle.
+- Stok yoksa "Kontrol edip size bilgi verelim" de.
+- Ürün linki varsa mutlaka paylaşabilirsin.
+- Müşteri link isterse ürün_linki değerini gönder.
+- Müşteri fotoğraf isterse foto_url değerini gönder.
+- "Link paylaşamam" deme.
+- "Fotoğraf paylaşamam" deme.
+- Genel link isterse ürün linkini gönder.
+- Ürün belli değilse hangi ürün için link istediğini sor.
+
+KAMPANYA:
 - 2. üründe %50 indirim var.
 - Her 2 üründe bir geçerli.
-- Ucuz olan ürün yarı fiyatına düşer.
+- Her ikilide ucuz olan ürün yarı fiyatına düşer.
+- Müşteri 2 veya daha fazla ürün alırsa kampanyayı mutlaka söyle.
 
-Sipariş almak istersen:
-- isim soyisim
-- telefon
-- şehir
-- ürün adı
-iste.
+SİPARİŞ ALMA:
+Müşteri sipariş vermek isterse şu bilgileri iste:
+- İsim soyisim
+- Telefon
+- Şehir
+- Ürün adı
 
-Ürünler:
+Bilgileri verirse şu cevabı ver:
+"Teşekkür ederiz 😊 Sipariş bilginizi aldık. Ekibimiz sizinle en kısa sürede iletişime geçecek."
+
+ÜRÜNLER:
 ${productListText(visibleProducts)}
 `;
 
@@ -168,7 +195,7 @@ ${productListText(visibleProducts)}
             content: text
           }
         ],
-        temperature: 0.5
+        temperature: 0.4
       },
       {
         headers: {
@@ -178,8 +205,7 @@ ${productListText(visibleProducts)}
       }
     );
 
-    const reply =
-      openaiResponse.data.choices[0].message.content;
+    const reply = openaiResponse.data.choices[0].message.content;
 
     await axios.post(
       `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
@@ -201,7 +227,6 @@ ${productListText(visibleProducts)}
     res.sendStatus(200);
   } catch (error) {
     console.log(error.response?.data || error.message);
-
     res.sendStatus(200);
   }
 });
