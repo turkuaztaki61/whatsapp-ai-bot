@@ -13,35 +13,8 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const GOOGLE_SHEET_URL = process.env.GOOGLE_SHEET_URL;
 
-async function getProducts() {
-  try {
-    const response = await axios.get(GOOGLE_SHEET_URL);
-    const text = response.data;
-
-    const rows = text.split("\n").slice(1);
-
-    return rows.map((row) => {
-      const cols = row.split(",");
-
-      return {
-        kategori: cols[0],
-        urun_adi: cols[1],
-        fiyat: cols[2],
-        stok: cols[3],
-        aciklama: cols[4],
-        foto_url: cols[5],
-        urun_linki: cols[6],
-        etiket: cols[7],
-        aktif: cols[8]
-      };
-    });
-  } catch (err) {
-    console.log(err);
-    return [];
-  }
-}
+const userOrders = {};
 
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -57,8 +30,7 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   try {
-    const message =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
     if (!message) {
       return res.sendStatus(200);
@@ -67,81 +39,148 @@ app.post("/webhook", async (req, res) => {
     const from = message.from;
     const text = message.text?.body?.toLowerCase() || "";
 
-    const products = await getProducts();
-
-    let foundProduct = null;
-
-    for (const product of products) {
-      const tags = product.etiket?.toLowerCase() || "";
-      const name = product.urun_adi?.toLowerCase() || "";
-
-      if (
-        text.includes(name) ||
-        tags.split(",").some((tag) => text.includes(tag.trim()))
-      ) {
-        foundProduct = product;
-        break;
-      }
+    if (!userOrders[from]) {
+      userOrders[from] = {
+        step: null,
+        data: {},
+      };
     }
 
-    let reply = "";
+    const order = userOrders[from];
 
-    if (foundProduct) {
-      if (text.includes("link")) {
-        reply = `Ürün linki:\n${foundProduct.urun_linki}`;
-      } else if (
-        text.includes("foto") ||
-        text.includes("resim")
-      ) {
-        reply = `Ürün fotoğrafı:\n${foundProduct.foto_url}`;
-      } else {
-        reply = `${foundProduct.urun_adi} fiyatı ${foundProduct.fiyat}₺.\n\n${foundProduct.aciklama}`;
-      }
-    } else {
-      const aiResponse = await axios.post(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          model: "gpt-4o-mini",
-          messages: [
-            {
-              role: "system",
-              content:
-                "Sen Turkuaz Takı müşteri temsilcisisin. Kısa ve samimi cevap ver."
-            },
-            {
-              role: "user",
-              content: text
-            }
-          ]
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${OPENAI_API_KEY}`,
-            "Content-Type": "application/json"
-          }
-        }
+    // Sipariş başlat
+    if (
+      text.includes("sipariş") ||
+      text.includes("satın almak") ||
+      text.includes("almak istiyorum")
+    ) {
+      order.step = "name";
+
+      await sendMessage(
+        from,
+        "Sipariş için ad soyadınızı yazar mısınız? 😊"
       );
 
-      reply =
-        aiResponse.data.choices[0].message.content;
+      return res.sendStatus(200);
     }
 
-    await axios.post(
-      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+    // Ad soyad
+    if (order.step === "name") {
+      order.data.name = text;
+      order.step = "phone";
+
+      await sendMessage(
+        from,
+        "Telefon numaranızı yazar mısınız? 📞"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // Telefon
+    if (order.step === "phone") {
+      order.data.phone = text;
+      order.step = "city";
+
+      await sendMessage(
+        from,
+        "Hangi şehirde yaşıyorsunuz? 🌍"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // Şehir
+    if (order.step === "city") {
+      order.data.city = text;
+      order.step = "address";
+
+      await sendMessage(
+        from,
+        "Açık adresinizi yazar mısınız? 📦"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // Adres
+    if (order.step === "address") {
+      order.data.address = text;
+      order.step = "product";
+
+      await sendMessage(
+        from,
+        "Hangi ürünü sipariş etmek istiyorsunuz? 🛍️"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // Ürün
+    if (order.step === "product") {
+      order.data.product = text;
+
+      const summary = `
+✅ Sipariş Alındı
+
+👤 Ad Soyad: ${order.data.name}
+📞 Telefon: ${order.data.phone}
+🌍 Şehir: ${order.data.city}
+📦 Adres: ${order.data.address}
+🛍️ Ürün: ${order.data.product}
+
+En kısa sürede sizinle iletişime geçeceğiz 😊
+`;
+
+      await sendMessage(from, summary);
+
+      console.log("Yeni sipariş:", order.data);
+
+      order.step = null;
+      order.data = {};
+
+      return res.sendStatus(200);
+    }
+
+    // Ürün link sistemi
+    if (text.includes("link")) {
+      await sendMessage(
+        from,
+        "Ürün linki:\nhttps://example.com/gold-burma-bilezik"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // AI cevap
+    const aiResponse = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
       {
-        messaging_product: "whatsapp",
-        to: from,
-        text: {
-          body: reply
-        }
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Sen Turkuaz Takı müşteri temsilcisisin. Kısa, samimi ve satış odaklı cevap ver.",
+          },
+          {
+            role: "user",
+            content: text,
+          },
+        ],
       },
       {
         headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
       }
     );
+
+    const reply =
+      aiResponse.data.choices[0].message.content;
+
+    await sendMessage(from, reply);
 
     res.sendStatus(200);
   } catch (error) {
@@ -149,6 +188,26 @@ app.post("/webhook", async (req, res) => {
     res.sendStatus(500);
   }
 });
+
+async function sendMessage(to, body) {
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: {
+        body,
+      },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+}
 
 app.listen(PORT, () => {
   console.log("Server çalışıyor:", PORT);
