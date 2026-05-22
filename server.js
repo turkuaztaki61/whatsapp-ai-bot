@@ -1,29 +1,42 @@
-import express from "express";
-import axios from "axios";
-import dotenv from "dotenv";
-
-dotenv.config();
+const express = require("express");
+const axios = require("axios");
+const { google } = require("googleapis");
+const OpenAI = require("openai");
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const ADMIN_PHONE = process.env.ADMIN_PHONE;
-const GOOGLE_SCRIPT_URL = process.env.GOOGLE_SCRIPT_URL;
+const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
+const GOOGLE_SERVICE_ACCOUNT = process.env.GOOGLE_SERVICE_ACCOUNT;
 
-async function sendMessage(to, body) {
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+const sessions = {};
+
+function temizleJson(text) {
+  try {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return {};
+    return JSON.parse(match[0]);
+  } catch {
+    return {};
+  }
+}
+
+async function sendWhatsAppMessage(to, message) {
   await axios.post(
     `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
     {
       messaging_product: "whatsapp",
       to,
       type: "text",
-      text: { body },
+      text: { body: message },
     },
     {
       headers: {
@@ -34,27 +47,85 @@ async function sendMessage(to, body) {
   );
 }
 
-async function saveOrderToSheet(order) {
-  if (!GOOGLE_SCRIPT_URL) return;
+async function saveToGoogleSheets(data) {
+  const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT);
 
-  await axios.post(GOOGLE_SCRIPT_URL, {
-    ad_soyad: order.ad_soyad,
-    telefon: order.telefon,
-    sehir: order.sehir,
-    adres: order.adres,
-    urun: order.urun,
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+
+  const sheets = google.sheets({ version: "v4", auth });
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range: "Sayfa1!A:H",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [
+        [
+          new Date().toLocaleString("tr-TR"),
+          data.ad_soyad || "",
+          data.telefon || "",
+          data.sehir || "",
+          data.adres || "",
+          data.urun || "",
+          data.olcu || "",
+          data.not || "",
+        ],
+      ],
+    },
   });
 }
 
-function extractJson(text) {
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) return null;
+async function analyzeMessage(message, oldData) {
+  const prompt = `
+Sen bir kuyumcu WhatsApp sipariş asistanısın.
 
-  try {
-    return JSON.parse(match[0]);
-  } catch {
-    return null;
-  }
+Görevin müşterinin mesajından sipariş bilgilerini çıkarmak.
+Eski bilgiler varsa onları koru, yeni mesajdaki bilgilerle tamamla.
+
+Kesinlikle açıklama yazma.
+Sadece JSON döndür.
+
+Eski bilgiler:
+${JSON.stringify(oldData || {})}
+
+Yeni müşteri mesajı:
+${message}
+
+JSON formatı:
+{
+  "ad_soyad": "",
+  "telefon": "",
+  "sehir": "",
+  "adres": "",
+  "urun": "",
+  "olcu": "",
+  "not": "",
+  "siparis_tamam": false,
+  "eksik_bilgi": ""
+}
+
+Kurallar:
+- Müşteri adını söylediyse ad_soyad alanına yaz.
+- Telefon numarasını yakala.
+- Ürün alyans, bilezik, yüzük, kolye vb olabilir.
+- Ölçü varsa olcu alanına yaz.
+- Şehir/ilçe varsa sehir alanına yaz.
+- Açık adres varsa adres alanına yaz.
+- Eski bilgileri asla silme.
+- Sipariş tamam sayılması için en az ad_soyad, telefon, ürün ve adres olmalı.
+- Eksik olan tek şeyi eksik_bilgi alanına yaz.
+`;
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0,
+  });
+
+  return temizleJson(response.choices[0].message.content);
 }
 
 app.get("/webhook", (req, res) => {
@@ -62,7 +133,7 @@ app.get("/webhook", (req, res) => {
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  if (mode && token === VERIFY_TOKEN) {
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
 
@@ -70,144 +141,85 @@ app.get("/webhook", (req, res) => {
 });
 
 app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
+
   try {
-    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const message = value?.messages?.[0];
 
-    if (!msg) return res.sendStatus(200);
+    if (!message || message.type !== "text") return;
 
-    const from = msg.from;
-    const text = msg.text?.body?.trim() || "";
-    const lower = text.toLocaleLowerCase("tr-TR");
+    const from = message.from;
+    const text = message.text.body;
 
-    if (
-      lower.includes("iptal") ||
-      lower.includes("vazgeç") ||
-      lower.includes("vazgec")
-    ) {
-      await sendMessage(from, "Sipariş işlemi iptal edildi ✅");
-      return res.sendStatus(200);
+    if (!sessions[from]) {
+      sessions[from] = {
+        ad_soyad: "",
+        telefon: "",
+        sehir: "",
+        adres: "",
+        urun: "",
+        olcu: "",
+        not: "",
+        saved: false,
+      };
     }
 
-    if (
-      lower === "link" ||
-      lower === "ürün linki" ||
-      lower === "urun linki"
-    ) {
-      await sendMessage(
+    const analyzed = await analyzeMessage(text, sessions[from]);
+
+    sessions[from] = {
+      ...sessions[from],
+      ...analyzed,
+    };
+
+    const data = sessions[from];
+
+    const tamam =
+      data.ad_soyad &&
+      data.telefon &&
+      data.urun &&
+      data.adres;
+
+    if (tamam && !data.saved) {
+      await saveToGoogleSheets(data);
+      sessions[from].saved = true;
+
+      await sendWhatsAppMessage(
         from,
-        "Ürün linki:\nhttps://example.com/gold-burma-bilezik"
+        `${data.ad_soyad}, sipariş bilgilerinizi aldım. En kısa sürede sizinle iletişime geçeceğiz.`
       );
-      return res.sendStatus(200);
+
+      return;
     }
 
-    if (
-      lower === "foto" ||
-      lower === "fotoğraf" ||
-      lower === "fotograf" ||
-      lower === "resim"
-    ) {
-      await sendMessage(
+    if (data.saved) {
+      await sendWhatsAppMessage(
         from,
-        "Ürün fotoğrafı:\nhttps://via.placeholder.com/600"
+        "Siparişiniz zaten kaydedildi. En kısa sürede sizinle iletişime geçeceğiz."
       );
-      return res.sendStatus(200);
+      return;
     }
 
-    const ai = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `
-Sen TURKUAZ TAKI'nın WhatsApp satış temsilcisisin.
+    let soru = "Siparişinizi tamamlamak için ";
 
-Görevin:
-Müşteri mesajından sipariş bilgilerini çıkar.
+    if (!data.ad_soyad) soru += "adınızı soyadınızı öğrenebilir miyim?";
+    else if (!data.telefon) soru += "telefon numaranızı öğrenebilir miyim?";
+    else if (!data.urun) soru += "almak istediğiniz ürünü öğrenebilir miyim?";
+    else if (!data.adres) soru += "açık adresinizi öğrenebilir miyim?";
+    else soru = "Eksik bilgileri paylaşabilir misiniz?";
 
-Toplanacak bilgiler:
-- ad_soyad
-- telefon
-- sehir
-- adres
-- urun
-
-Eğer tüm bilgiler varsa SADECE JSON döndür:
-{
-  "siparis_tamam": true,
-  "ad_soyad": "",
-  "telefon": "",
-  "sehir": "",
-  "adres": "",
-  "urun": ""
-}
-
-Eğer bilgi eksikse JSON döndürme.
-Sadece müşteriye kısa ve doğal şekilde eksik olan bilgiyi sor.
-
-Kurallar:
-- Yapay zeka olduğunu söyleme.
-- Aynı bilgiyi tekrar isteme.
-- Gereksiz uzun konuşma.
-`,
-          },
-          {
-            role: "user",
-            content: text,
-          },
-        ],
-        temperature: 0.1,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const aiReply = ai.data.choices[0].message.content.trim();
-    const order = extractJson(aiReply);
-
-    if (order && order.siparis_tamam) {
-      const customerText = `✅ Siparişiniz alınmıştır
-
-👤 Ad Soyad: ${order.ad_soyad}
-📞 Telefon: ${order.telefon}
-🌍 Şehir: ${order.sehir}
-📦 Adres: ${order.adres}
-🛍️ Ürün: ${order.urun}
-
-Sizinle kısa sürede iletişime geçeceğiz 😊`;
-
-      const adminText = `🛒 Yeni Sipariş
-
-👤 Ad Soyad: ${order.ad_soyad}
-📞 Telefon: ${order.telefon}
-🌍 Şehir: ${order.sehir}
-📦 Adres: ${order.adres}
-🛍️ Ürün: ${order.urun}`;
-
-      await sendMessage(from, customerText);
-
-      if (ADMIN_PHONE) {
-        await sendMessage(ADMIN_PHONE, adminText);
-      }
-
-      await saveOrderToSheet(order);
-
-      return res.sendStatus(200);
-    }
-
-    await sendMessage(from, aiReply);
-    return res.sendStatus(200);
+    await sendWhatsAppMessage(from, soru);
   } catch (error) {
-    console.log(error.response?.data || error.message);
-    return res.sendStatus(200);
+    console.error("Webhook hata:", error.response?.data || error.message);
   }
 });
 
+app.get("/", (req, res) => {
+  res.send("WhatsApp bot çalışıyor.");
+});
+
 app.listen(PORT, () => {
-  console.log("Server çalışıyor:", PORT);
+  console.log(`Server ${PORT} portunda çalışıyor`);
 });
