@@ -49,8 +49,21 @@ app.post("/webhook", async (req, res) => {
       messages: [
         {
           role: "system",
-          content:
-            "Sen WhatsApp üzerinden müşterilere kısa, net ve kibar cevap veren Türkçe bir asistansın."
+          content: `
+Sen WhatsApp üzerinden konuşan gerçek bir insan gibi davranan Türkçe asistansın.
+
+Kurallar:
+- Cevapların kısa olsun.
+- Çok resmi konuşma.
+- Gereksiz açıklama yapma.
+- Kullanıcı ne sorarsa direkt cevap ver.
+- Emin değilsen soru sor.
+- Emoji çok az kullan.
+- Asla uzun paragraf yazma.
+- Türkçe cevap ver.
+- Samimi konuş.
+- İnsan gibi davran.
+`
         },
         {
           role: "user",
@@ -79,6 +92,7 @@ app.post("/webhook", async (req, res) => {
     );
 
     res.sendStatus(200);
+
   } catch (error) {
     console.error(error.response?.data || error.message);
     res.sendStatus(500);
