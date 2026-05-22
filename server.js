@@ -43,9 +43,13 @@ async function askChatGPT(userMessage) {
 
   const data = await response.json();
 
-  console.log("OPENAI CEVABI:", data);
+  console.log("OPENAI CEVABI:", JSON.stringify(data, null, 2));
 
-  return data.output_text || "Şu an cevap oluşturamadım.";
+  return (
+    data.output?.[0]?.content?.[0]?.text ||
+    data.output_text ||
+    "Şu an cevap oluşturamadım."
+  );
 }
 
 async function sendWhatsAppMessage(to, text) {
@@ -68,7 +72,7 @@ async function sendWhatsAppMessage(to, text) {
   );
 
   const data = await response.json();
-  console.log("WHATSAPP CEVABI:", data);
+  console.log("WHATSAPP CEVABI:", JSON.stringify(data, null, 2));
 }
 
 app.post("/webhook", async (req, res) => {
@@ -86,6 +90,8 @@ app.post("/webhook", async (req, res) => {
       console.log("KULLANICI MESAJI:", userText);
 
       const aiReply = await askChatGPT(userText);
+
+      console.log("GÖNDERİLECEK CEVAP:", aiReply);
 
       await sendWhatsAppMessage(from, aiReply);
     }
