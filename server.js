@@ -46,7 +46,9 @@ async function sendWhatsAppMessage(to, message) {
 }
 
 async function saveToGoogleSheets(data) {
-  await axios.post(GOOGLE_SCRIPT_URL, {
+  console.log("GOOGLE_SCRIPT_URL:", GOOGLE_SCRIPT_URL);
+
+  const payload = {
     tarih: new Date().toLocaleString("tr-TR"),
     ad_soyad: data.ad_soyad || "",
     telefon: data.telefon || "",
@@ -56,7 +58,17 @@ async function saveToGoogleSheets(data) {
     olcu: data.olcu || "",
     durum: "Yeni Sipariş",
     mesaj: data.mesaj || "",
+  };
+
+  console.log("Sheets giden veri:", payload);
+
+  const response = await axios.post(GOOGLE_SCRIPT_URL, payload, {
+    headers: {
+      "Content-Type": "application/json",
+    },
   });
+
+  console.log("Sheets cevap:", response.data);
 }
 
 async function analyzeMessage(message, oldData) {
