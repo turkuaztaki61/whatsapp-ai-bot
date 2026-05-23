@@ -14,8 +14,21 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GOOGLE_SCRIPT_URL = process.env.GOOGLE_SCRIPT_URL;
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
 const sessions = {};
+
+function emptySession() {
+  return {
+    ad_soyad: "",
+    telefon: "",
+    sehir: "",
+    adres: "",
+    urun: "",
+    olcu: "",
+    not: "",
+    mesaj: "",
+    saved: false,
+  };
+}
 
 function temizleJson(text) {
   try {
@@ -46,8 +59,6 @@ async function sendWhatsAppMessage(to, message) {
 }
 
 async function saveToGoogleSheets(data) {
-  console.log("GOOGLE_SCRIPT_URL:", GOOGLE_SCRIPT_URL);
-
   const payload = {
     tarih: new Date().toLocaleString("tr-TR"),
     ad_soyad: data.ad_soyad || "",
@@ -63,9 +74,7 @@ async function saveToGoogleSheets(data) {
   console.log("Sheets giden veri:", payload);
 
   const response = await axios.post(GOOGLE_SCRIPT_URL, payload, {
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
   });
 
   console.log("Sheets cevap:", response.data);
@@ -77,7 +86,7 @@ Sen bir kuyumcu WhatsApp sipariş asistanısın.
 
 Müşteri mesajından sipariş bilgilerini çıkar.
 Eski bilgileri koru, yeni mesajdaki bilgilerle tamamla.
-Sadece JSON döndür. Açıklama yazma.
+Sadece JSON döndür.
 
 Eski bilgiler:
 ${JSON.stringify(oldData || {})}
@@ -100,12 +109,6 @@ JSON formatı:
 
 Kurallar:
 - Eski bilgileri asla silme.
-- Müşteri ismini söylediyse ad_soyad alanına yaz.
-- Telefon numarasını yakala.
-- Ürün alyans, bilezik, yüzük, kolye vb olabilir.
-- Ölçü varsa olcu alanına yaz.
-- Şehir/ilçe varsa sehir alanına yaz.
-- Açık adres varsa adres alanına yaz.
 - Sipariş tamam olması için ad_soyad, telefon, urun ve adres dolu olmalı.
 `;
 
@@ -134,25 +137,49 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const message =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-
+    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!message || message.type !== "text") return;
 
     const from = message.from;
-    const text = message.text.body;
+    const text = message.text.body.trim();
+    const lower = text.toLowerCase();
 
     if (!sessions[from]) {
-      sessions[from] = {
-        ad_soyad: "",
-        telefon: "",
-        sehir: "",
-        adres: "",
-        urun: "",
-        olcu: "",
-        not: "",
-        saved: false,
-      };
+      sessions[from] = emptySession();
+    }
+
+    if (
+      lower === "iptal" ||
+      lower.includes("iptal et") ||
+      lower.includes("vazgeçtim") ||
+      lower.includes("vazgeç")
+    ) {
+      sessions[from] = emptySession();
+
+      await sendWhatsAppMessage(
+        from,
+        "Siparişiniz iptal edildi. Yeni sipariş vermek isterseniz bilgileri tekrar yazabilirsiniz."
+      );
+      return;
+    }
+
+    if (
+      lower.includes("yeni sipariş") ||
+      lower.includes("yeni siparis") ||
+      lower.includes("baştan") ||
+      lower.includes("bastan")
+    ) {
+      sessions[from] = emptySession();
+
+      await sendWhatsAppMessage(
+        from,
+        "Yeni sipariş için bilgilerinizi alabilirim. Ürün, telefon ve adres bilgilerinizi yazabilirsiniz."
+      );
+      return;
+    }
+
+    if (sessions[from].saved) {
+      sessions[from] = emptySession();
     }
 
     const analyzed = await analyzeMessage(text, sessions[from]);
@@ -165,11 +192,7 @@ app.post("/webhook", async (req, res) => {
 
     const data = sessions[from];
 
-    const tamam =
-      data.ad_soyad &&
-      data.telefon &&
-      data.urun &&
-      data.adres;
+    const tamam = data.ad_soyad && data.telefon && data.urun && data.adres;
 
     if (tamam && !data.saved) {
       await saveToGoogleSheets(data);
@@ -178,15 +201,6 @@ app.post("/webhook", async (req, res) => {
       await sendWhatsAppMessage(
         from,
         `${data.ad_soyad}, sipariş bilgilerinizi aldım. En kısa sürede sizinle iletişime geçeceğiz.`
-      );
-
-      return;
-    }
-
-    if (data.saved) {
-      await sendWhatsAppMessage(
-        from,
-        "Siparişiniz zaten kaydedildi. En kısa sürede sizinle iletişime geçeceğiz."
       );
       return;
     }
