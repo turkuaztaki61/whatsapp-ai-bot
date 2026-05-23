@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const OpenAI = require("openai");
 
 const app = express();
 app.use(express.json());
@@ -9,19 +10,47 @@ const PORT = process.env.PORT || 10000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GOOGLE_SCRIPT_URL = process.env.GOOGLE_SCRIPT_URL;
 
-const userState = {};
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-async function sendWhatsAppMessage(to, text) {
+const sessions = {};
+
+function emptySession() {
+  return {
+    messages: [],
+    order: {
+      ad_soyad: "",
+      telefon: "",
+      sehir: "",
+      adres: "",
+      urun: "",
+      olcu: "",
+      not: "",
+    },
+    saved: false,
+  };
+}
+
+function extractJson(text) {
+  try {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+}
+
+async function sendWhatsAppMessage(to, message) {
   await axios.post(
     `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
     {
       messaging_product: "whatsapp",
       to,
-      text: {
-        body: text,
-      },
+      type: "text",
+      text: { body: message },
     },
     {
       headers: {
@@ -30,6 +59,83 @@ async function sendWhatsAppMessage(to, text) {
       },
     }
   );
+}
+
+async function saveToGoogleSheets(order, lastMessage) {
+  const payload = {
+    tarih: new Date().toLocaleString("tr-TR"),
+    ad_soyad: order.ad_soyad || "",
+    telefon: order.telefon || "",
+    sehir: order.sehir || "",
+    adres: order.adres || "",
+    urun: order.urun || "",
+    olcu: order.olcu || "",
+    durum: "Yeni Sipariş",
+    mesaj: lastMessage || "",
+  };
+
+  console.log("Sheets gönderi:", payload);
+
+  const response = await axios.post(GOOGLE_SCRIPT_URL, payload, {
+    headers: { "Content-Type": "application/json" },
+  });
+
+  console.log("Sheets cevap:", response.data);
+}
+
+async function aiReply(userText, session) {
+  const systemPrompt = `
+Sen Turkuaz Takı için WhatsApp müşteri temsilcisisin.
+
+Görevin:
+- Müşteriyle doğal, kısa ve samimi konuş.
+- Kalıp gibi konuşma.
+- Aynı soruyu tekrar tekrar sorma.
+- Bildiğin bilgiyi tekrar isteme.
+- Müşteri tek mesajda tüm bilgileri yazarsa direkt siparişi al.
+- Sipariş için gerekli bilgiler: ad_soyad, telefon, urun, adres.
+- Ölçü, şehir ve not varsa ayrıca kaydet.
+- Müşteri iptal, vazgeçtim, iptal et derse siparişi iptal et.
+- Müşteri sadece sohbet ederse normal cevap ver.
+- Ürün sorarsa yardımcı ol.
+- Fiyat konusunda kesin fiyat verme, "net fiyat için ekibimiz dönüş yapacak" de.
+
+ÇOK ÖNEMLİ:
+Sadece JSON döndür. Açıklama yazma.
+
+JSON formatı:
+{
+  "reply": "müşteriye gönderilecek cevap",
+  "order": {
+    "ad_soyad": "",
+    "telefon": "",
+    "sehir": "",
+    "adres": "",
+    "urun": "",
+    "olcu": "",
+    "not": ""
+  },
+  "order_complete": false,
+  "cancelled": false
+}
+
+Mevcut sipariş bilgisi:
+${JSON.stringify(session.order)}
+
+Konuşma geçmişi:
+${JSON.stringify(session.messages.slice(-10))}
+`;
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.4,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userText },
+    ],
+  });
+
+  return extractJson(response.choices[0].message.content);
 }
 
 app.get("/", (req, res) => {
@@ -45,184 +151,105 @@ app.get("/webhook", (req, res) => {
     return res.status(200).send(challenge);
   }
 
-  res.sendStatus(403);
+  return res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const message =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) return;
-    if (message.type !== "text") return;
+    if (!message || message.type !== "text") return;
 
     const from = message.from;
     const text = message.text.body.trim();
-    const lowerText = text.toLowerCase();
+    const lower = text.toLowerCase();
 
-    // Kullanıcı yoksa oluştur
-    if (!userState[from]) {
-      userState[from] = {
-        siparisTamamlandi: false,
-      };
+    if (!sessions[from]) {
+      sessions[from] = emptySession();
     }
 
-    // İPTAL KOMUTU
     if (
-      lowerText === "iptal" ||
-      lowerText.includes("iptal")
+      lower === "iptal" ||
+      lower.includes("iptal") ||
+      lower.includes("vazgeç")
     ) {
-
-      // Kullanıcının siparişini sil
-      delete userState[from];
+      sessions[from] = emptySession();
 
       await sendWhatsAppMessage(
         from,
-        "Siparişiniz iptal edildi."
+        "Tamam, siparişinizi iptal ettim. Yeni sipariş vermek isterseniz buradayım."
       );
 
       return;
     }
 
-    // Önceki sipariş varsa
-    if (userState[from].siparisTamamlandi) {
+    const session = sessions[from];
+
+    if (session.saved) {
+      sessions[from] = emptySession();
+      sessions[from].messages.push({ role: "user", content: text });
+    } else {
+      session.messages.push({ role: "user", content: text });
+    }
+
+    const activeSession = sessions[from];
+    const ai = await aiReply(text, activeSession);
+
+    if (!ai || !ai.reply) {
       await sendWhatsAppMessage(
         from,
-        "Siparişiniz zaten kayıtlı."
+        "Mesajınızı aldım. Size yardımcı olayım, nasıl bir ürün istiyorsunuz?"
+      );
+      return;
+    }
+
+    if (ai.cancelled) {
+      sessions[from] = emptySession();
+
+      await sendWhatsAppMessage(
+        from,
+        "Tamam, siparişinizi iptal ettim. Yeni sipariş vermek isterseniz buradayım."
       );
 
       return;
     }
 
-    // Telefon
-    const telefonMatch =
-      text.match(/0\s?5\d{2}\s?\d{3}\s?\d{2}\s?\d{2}/);
-
-    const telefon = telefonMatch
-      ? telefonMatch[0]
-      : "";
-
-    // Ölçü
-    const olcuMatch =
-      text.match(/ölçü\s?(\d+)/i);
-
-    const olcu = olcuMatch
-      ? olcuMatch[1]
-      : "";
-
-    // Ürün
-    let urun = "";
-
-    if (lowerText.includes("alyans")) {
-      urun = "Alyans";
-    }
-
-    // Ad Soyad
-    let adSoyad = "";
-
-    const benMatch =
-      text.match(/ben\s+([a-zA-ZçğıöşüÇĞİÖŞÜ\s]+)/i);
-
-    if (benMatch) {
-      adSoyad = benMatch[1]
-        .split("telefon")[0]
-        .split("adres")[0]
-        .split("ölçü")[0]
-        .trim();
-    }
-
-    // Adres
-    let adres = "";
-
-    const adresMatch =
-      text.match(/adres\s+(.+)/i);
-
-    if (adresMatch) {
-      adres = adresMatch[1].trim();
-    }
-
-    // Şehir
-    let sehir = "";
-
-    const sehirler = [
-      "istanbul",
-      "ankara",
-      "izmir",
-      "trabzon",
-      "antalya",
-      "bursa",
-      "adana",
-      "konya",
-      "samsun",
-      "ordu",
-      "rize",
-    ];
-
-    for (const s of sehirler) {
-      if (lowerText.includes(s)) {
-        sehir =
-          s.charAt(0).toUpperCase() +
-          s.slice(1);
-
-        break;
-      }
-    }
-
-    // Sheets veri
-    const siparisData = {
-      tarih: new Date().toLocaleString("tr-TR"),
-      ad_soyad: adSoyad,
-      telefon,
-      sehir,
-      adres,
-      urun,
-      olcu,
-      durum: "Yeni Sipariş",
-      mesaj: text,
+    activeSession.order = {
+      ...activeSession.order,
+      ...ai.order,
     };
 
-    console.log(
-      "Sheets gönderi:",
-      siparisData
-    );
+    activeSession.messages.push({
+      role: "assistant",
+      content: ai.reply,
+    });
 
-    try {
-      const response = await axios.post(
-        GOOGLE_SCRIPT_URL,
-        siparisData
+    const complete =
+      activeSession.order.ad_soyad &&
+      activeSession.order.telefon &&
+      activeSession.order.urun &&
+      activeSession.order.adres;
+
+    if (complete && !activeSession.saved) {
+      await saveToGoogleSheets(activeSession.order, text);
+      activeSession.saved = true;
+
+      await sendWhatsAppMessage(
+        from,
+        `${activeSession.order.ad_soyad}, sipariş bilgilerinizi aldım. En kısa sürede sizinle iletişime geçeceğiz.`
       );
 
-      console.log(
-        "Sheets cevap:",
-        response.data
-      );
-    } catch (err) {
-      console.log(
-        "Sheets hata:",
-        err.message
-      );
+      return;
     }
 
-    // Sipariş tamamlandı
-    userState[from].siparisTamamlandi = true;
-
-    await sendWhatsAppMessage(
-      from,
-      `${adSoyad || "Müşteri"}, sipariş bilgilerinizi aldım.`
-    );
-
+    await sendWhatsAppMessage(from, ai.reply);
   } catch (error) {
-    console.log(
-      "Webhook hata:",
-      error.message
-    );
+    console.log("Webhook hata:", error.response?.data || error.message);
   }
 });
 
 app.listen(PORT, () => {
-  console.log(
-    `Server ${PORT} portunda çalışıyor`
-  );
+  console.log(`Server ${PORT} portunda çalışıyor`);
 });
